@@ -1,0 +1,28 @@
+- Prefer dash case for file names:
+
+AuthButton.tsx -> auth-button.tsx
+DeleteChatButton.tsx -> delete-chat-button.tsx
+
+- Prefer TypeScript over JavaScript
+
+- Where possible, adjust type imports so they use 'type' on the entire import, not just the specific named imports:
+
+import { type Message } from "ai"; -> import type { Message } from "ai";
+
+- Use lucide-react for icons
+
+- Use size-\_ instead of h-\* and w-\*
+
+h-4 w-4 -> size-4
+h-5 w-5 -> size-5
+h-6 w-6 -> size-6
+h-7 w-7 -> size-7
+h-8 w-8 -> size-8
+
+- Use sonner for toasts
+
+- Prefer non-optional properties where possible
+
+abc?: string; -> abc: string;
+
+- Use pnpm for package manager

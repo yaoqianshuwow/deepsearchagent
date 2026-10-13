@@ -1,0 +1,35 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+## Tools
+
+Vercel AI SDK, using `ai` for the backend and `@ai-sdk/react` for the frontend.
+
+## Important Files
+
+Here are the important files in the repo.
+
+**src/app/chat.tsx** is the 'use client'-enabled chat page where the `useChat` implementation lives.
+**src/app/page.tsx** is the server-enabled page where you can make requests (or authenticated the user) on the server.
+**src/app/api/chat/route.ts** is the place where the API route for handling the `streamText` implementation should live.
+
+**src/models.ts** is where model declarations should live.
+**src/serper.ts** is where the serper implementation lives.
+**src/types.ts** is where general-use types should live.
+**src/utils.ts** is where general-use utilities should live.
+
+**src/components** is where the components for the repo live, in dash-cased names like `auth-button.tsx`
+
+**src/server/db/schema.ts** is where the drizzle schema lives.
+**src/server/db/queries.ts** is where helper functions for calling the db live.
+
+**src/server/auth/index.ts** is where the authentication functions like `signIn`, `signOut` and `auth` live. These are powered by `next-auth`.
+
+**.env** is where environment variables for the user should be provided.
+**src/env.js** is where environment variables are checked using type-safe methods. Changes to the .env file should be reflected there.
+
+## Scripts
+
+`pnpm run db:push` can be used to migrate the Postgres database using the drizzle schema. Run this after changes to the drizzle schema.
