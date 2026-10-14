@@ -6,6 +6,7 @@ import { useState } from "react";
 
 import { ChatMessage } from "~/components/chat-message";
 import { SignInModal } from "~/components/sign-in-modal";
+import type { SearchChatMessage } from "~/types/chat";
 
 interface ChatProps {
   userName: string;
@@ -15,7 +16,7 @@ interface ChatProps {
 export const ChatPage = ({ userName, isAuthenticated }: ChatProps) => {
   const [input, setInput] = useState("");
   const [isSignInOpen, setIsSignInOpen] = useState(false);
-  const { messages, sendMessage, status, error } = useChat();
+  const { messages, sendMessage, status, error } = useChat<SearchChatMessage>();
   const isLoading = status === "submitted" || status === "streaming";
 
   const handleFormSubmit = (e: React.FormEvent) => {
@@ -40,21 +41,14 @@ export const ChatPage = ({ userName, isAuthenticated }: ChatProps) => {
           role="log"
           aria-label="Chat messages"
         >
-          {messages.map((message) => {
-            const text = message.parts
-              .filter((part) => part.type === "text")
-              .map((part) => (part.type === "text" ? part.text : ""))
-              .join("");
-
-            return (
-              <ChatMessage
-                key={message.id}
-                text={text}
-                role={message.role}
-                userName={userName}
-              />
-            );
-          })}
+          {messages.map((message) => (
+            <ChatMessage
+              key={message.id}
+              parts={message.parts}
+              role={message.role}
+              userName={userName}
+            />
+          ))}
         </div>
 
         <div className="border-t border-gray-700">
