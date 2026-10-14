@@ -3,6 +3,8 @@ import {
   LoadAPIKeyError,
   RetryError,
   convertToModelMessages,
+  createUIMessageStream,
+  createUIMessageStreamResponse,
   isStepCount,
   streamText,
   tool,
@@ -134,8 +136,7 @@ export async function POST(request: Request) {
     tools,
   });
 
-  return result.toUIMessageStreamResponse<SearchChatMessage>({
-    headers: { "X-Chat-Id": savedChatId },
+  const modelStream = result.toUIMessageStream<SearchChatMessage>({
     originalMessages: messages,
     generateMessageId: () => crypto.randomUUID(),
     onEnd: async ({
@@ -175,5 +176,22 @@ export async function POST(request: Request) {
       }
       return "生成回复失败，请稍后重试并检查服务器日志。";
     },
+  });
+
+  const stream = createUIMessageStream<SearchChatMessage>({
+    execute: ({ writer }) => {
+      if (!chatId) {
+        writer.write({
+          type: "data-chat-created",
+          data: { chatId: savedChatId },
+          transient: true,
+        });
+      }
+      writer.merge(modelStream);
+    },
+  });
+  return createUIMessageStreamResponse({
+    stream,
+    headers: { "X-Chat-Id": savedChatId },
   });
 }

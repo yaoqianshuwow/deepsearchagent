@@ -33,6 +33,13 @@ vi.mock("ai", async (importOriginal) => ({
 
 import { POST } from "./route";
 
+const emptyModelStream = () =>
+  new ReadableStream<AISDK.UIMessageChunk>({
+    start(controller) {
+      controller.close();
+    },
+  });
+
 describe("chat authentication", () => {
   beforeEach(() => {
     vi.resetAllMocks();
@@ -71,8 +78,8 @@ describe("chat authentication", () => {
     ];
     const modelMessages = [{ role: "user", content: "Hi" }];
     mocks.convert.mockResolvedValue(modelMessages);
-    mocks.response.mockReturnValue(new Response("stream", { status: 200 }));
-    mocks.stream.mockReturnValue({ toUIMessageStreamResponse: mocks.response });
+    mocks.response.mockReturnValue(emptyModelStream());
+    mocks.stream.mockReturnValue({ toUIMessageStream: mocks.response });
 
     const response = await POST(
       new Request("http://localhost/api/chat", {
@@ -82,7 +89,7 @@ describe("chat authentication", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(await response.text()).toBe("stream");
+    expect(await response.text()).toContain('"type":"data-chat-created"');
     expect(mocks.convert).toHaveBeenCalledWith(messages);
     expect(mocks.quota).toHaveBeenCalledWith("test-user");
     expect(mocks.stream).toHaveBeenCalledWith(
@@ -96,8 +103,8 @@ describe("chat authentication", () => {
   it("executes Serper search with cancellation and returns only source summaries", async () => {
     mocks.auth.mockResolvedValue({ user: { id: "test-user" } });
     mocks.convert.mockResolvedValue([]);
-    mocks.response.mockReturnValue(new Response("stream"));
-    mocks.stream.mockReturnValue({ toUIMessageStreamResponse: mocks.response });
+    mocks.response.mockReturnValue(emptyModelStream());
+    mocks.stream.mockReturnValue({ toUIMessageStream: mocks.response });
     mocks.search.mockResolvedValue({
       organic: [
         {
@@ -224,9 +231,7 @@ describe("chat persistence", () => {
     });
   const responseOptions = () =>
     mocks.response.mock
-      .calls[0]![0] as AISDK.UIMessageStreamOptions<SearchChatMessage> & {
-      headers: HeadersInit;
-    };
+      .calls[0]![0] as AISDK.UIMessageStreamOptions<SearchChatMessage>;
 
   beforeEach(() => {
     vi.resetAllMocks();
@@ -234,11 +239,8 @@ describe("chat persistence", () => {
     mocks.quota.mockResolvedValue({ status: "allowed" });
     mocks.convert.mockResolvedValue([]);
     mocks.upsertChat.mockResolvedValue({});
-    mocks.response.mockImplementation(
-      (options: { headers: HeadersInit }) =>
-        new Response("stream", { headers: options.headers }),
-    );
-    mocks.stream.mockReturnValue({ toUIMessageStreamResponse: mocks.response });
+    mocks.response.mockImplementation(emptyModelStream);
+    mocks.stream.mockReturnValue({ toUIMessageStream: mocks.response });
   });
 
   it("saves before generation, uses the session's user, and returns the generated chat id", async () => {
@@ -255,6 +257,13 @@ describe("chat persistence", () => {
       mocks.stream.mock.invocationCallOrder[0]!,
     );
     expect(responseOptions().originalMessages).toEqual(messages);
+    expect(await response.text()).toContain(
+      JSON.stringify({
+        type: "data-chat-created",
+        data: { chatId },
+        transient: true,
+      }),
+    );
   });
 
   it("reuses an owned chat id and preserves its title", async () => {
@@ -274,6 +283,7 @@ describe("chat persistence", () => {
       title: "原来的标题",
       messages,
     });
+    expect(await response.text()).not.toContain("data-chat-created");
   });
 
   it("rejects a missing or inaccessible chat before consuming quota or saving", async () => {
@@ -423,6 +433,12 @@ describe("chat persistence", () => {
     expect(assistant.role).toBe("assistant");
     expect(assistant.id).toMatch(/^[0-9a-f-]{36}$/);
     expect(wire).toContain(assistant.id);
+    expect(wire.indexOf('"type":"data-chat-created"')).toBeLessThan(
+      wire.indexOf('"type":"text-delta"'),
+    );
+    expect(
+      assistant.parts.some((part) => part.type === "data-chat-created"),
+    ).toBe(false);
     expect(assistant.parts).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ type: "text", text: "搜索后的回答" }),

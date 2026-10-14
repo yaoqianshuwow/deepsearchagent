@@ -1,11 +1,11 @@
-import type { UIDataTypes, UIMessage } from "ai";
+import type { UIMessage } from "ai";
 import type { searchSerper } from "~/serper";
 
 type SearchResult = Awaited<ReturnType<typeof searchSerper>>["organic"][number];
 
 export type SearchChatMessage = UIMessage<
   unknown,
-  UIDataTypes,
+  { "chat-created": { chatId: string } },
   {
     searchWeb: {
       input: { query: string };
