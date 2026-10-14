@@ -9,7 +9,9 @@ import {
   varchar,
   boolean,
   serial,
+  jsonb,
 } from "drizzle-orm/pg-core";
+import type { SearchChatMessage } from "~/types/chat";
 import type { AdapterAccount } from "next-auth/adapters";
 import type { InferSelectModel, InferInsertModel } from "drizzle-orm";
 
@@ -39,6 +41,61 @@ export const users = createTable("user", {
 export const usersRelations = relations(users, ({ many }) => ({
   accounts: many(accounts),
   chatRequests: many(chatRequests),
+  chats: many(chats),
+}));
+
+export const chats = createTable(
+  "chat",
+  {
+    id: varchar("id", { length: 255 }).notNull().primaryKey(),
+    userId: varchar("user_id", { length: 255 })
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    createdAt: timestamp("created_at", { mode: "date", withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (chat) => ({
+    userUpdatedIdx: index("chat_user_updated_idx").on(
+      chat.userId,
+      chat.updatedAt,
+    ),
+  }),
+);
+
+export const messages = createTable(
+  "message",
+  {
+    id: varchar("id", { length: 255 }).notNull(),
+    chatId: varchar("chat_id", { length: 255 })
+      .notNull()
+      .references(() => chats.id, { onDelete: "cascade" }),
+    role: varchar("role", { length: 32 })
+      .$type<SearchChatMessage["role"]>()
+      .notNull(),
+    parts: jsonb("parts").$type<SearchChatMessage["parts"]>().notNull(),
+    order: integer("order").notNull(),
+  },
+  (message) => ({
+    compoundKey: primaryKey({ columns: [message.chatId, message.id] }),
+    chatOrderIdx: index("message_chat_order_idx").on(
+      message.chatId,
+      message.order,
+    ),
+  }),
+);
+
+export const chatsRelations = relations(chats, ({ one, many }) => ({
+  user: one(users, { fields: [chats.userId], references: [users.id] }),
+  messages: many(messages),
+}));
+
+export const messagesRelations = relations(messages, ({ one }) => ({
+  chat: one(chats, { fields: [messages.chatId], references: [chats.id] }),
 }));
 
 export const chatRequests = createTable(
@@ -136,6 +193,11 @@ export const verificationTokens = createTable(
 );
 
 export declare namespace DB {
+  export type Chat = InferSelectModel<typeof chats>;
+  export type NewChat = InferInsertModel<typeof chats>;
+  export type Message = InferSelectModel<typeof messages>;
+  export type NewMessage = InferInsertModel<typeof messages>;
+
   export type User = InferSelectModel<typeof users>;
   export type NewUser = InferInsertModel<typeof users>;
 

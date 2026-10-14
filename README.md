@@ -20,7 +20,26 @@ pnpm exec vitest run src/server/chat-rate-limit.integration.test.ts
 Remove-Item Env:RUN_RATE_LIMIT_DB_TESTS
 ```
 
-## TODO
+## Day 2：第一题——聊天存储
+
+`src/server/db/schema.ts` 定义聊天和消息表，`src/server/chats.ts` 提供：
+
+- `upsertChat({ userId, chatId, title, messages })`：按指定 ID 创建或更新聊天，在事务中整体替换消息；拒绝修改其他用户的聊天。
+- `getChat({ userId, chatId })`：读取自己的聊天及按原顺序排列的消息；不存在或不属于自己时返回 `undefined`。
+- `getChats({ userId })`：只读取自己的聊天列表，按最近更新时间排序，不加载消息。
+
+消息使用现有 `SearchChatMessage` 类型，保存 ID、role、parts 和顺序，包含搜索工具调用及结果。调用方必须使用服务端登录会话中的 `userId`。本题尚未接入聊天 API 和页面，刷新页面后恢复历史属于后续题目。
+
+运行 `pnpm db:push` 同步本地表结构。真实数据库测试只创建临时测试用户，结束后级联删除其聊天和消息：
+
+```powershell
+$env:RUN_CHAT_DB_TESTS = "1"
+try { pnpm exec vitest run src/server/chats.integration.test.ts }
+finally { Remove-Item Env:RUN_CHAT_DB_TESTS }
+pnpm check
+```
+
+## 后续待办
 
 Do related followup questions.
 
