@@ -1,15 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type * as AISDK from "ai";
 
 const mocks = vi.hoisted(() => ({
   auth: vi.fn(),
   convert: vi.fn(),
   stream: vi.fn(),
   response: vi.fn(),
+  search: vi.fn(),
 }));
 
 vi.mock("~/server/auth", () => ({ auth: mocks.auth }));
 vi.mock("~/model", () => ({ model: "test-model" }));
-vi.mock("ai", () => ({
+vi.mock("~/serper", () => ({ searchSerper: mocks.search }));
+vi.mock("ai", async (importOriginal) => ({
+  ...(await importOriginal<typeof AISDK>()),
   APICallError: { isInstance: () => false },
   LoadAPIKeyError: { isInstance: () => false },
   RetryError: { isInstance: () => false },
@@ -68,9 +72,62 @@ describe("chat authentication", () => {
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("stream");
     expect(mocks.convert).toHaveBeenCalledWith(messages);
-    expect(mocks.stream).toHaveBeenCalledWith({
-      model: "test-model",
-      messages: modelMessages,
+    expect(mocks.stream).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "test-model",
+        messages: modelMessages,
+      }),
+    );
+  });
+
+  it("executes Serper search with cancellation and returns only source summaries", async () => {
+    mocks.auth.mockResolvedValue({ user: { id: "test-user" } });
+    mocks.convert.mockResolvedValue([]);
+    mocks.response.mockReturnValue(new Response("stream"));
+    mocks.stream.mockReturnValue({ toUIMessageStreamResponse: mocks.response });
+    mocks.search.mockResolvedValue({
+      organic: [
+        {
+          title: "Example",
+          link: "https://example.com",
+          snippet: "Search summary",
+          position: 1,
+        },
+      ],
+      credits: 1,
     });
+    const request = new Request("http://localhost/api/chat", {
+      method: "POST",
+      body: JSON.stringify({ messages: [] }),
+    });
+    await POST(request);
+    const options = mocks.stream.mock.calls[0]![0] as Parameters<
+      typeof AISDK.streamText
+    >[0];
+    expect(options.abortSignal).toBe(request.signal);
+    const search = options.tools!.searchWeb! as AISDK.Tool<
+      { query: string },
+      { title: string; link: string; snippet: string }[]
+    >;
+    const results = await search.execute!(
+      { query: "test query" },
+      {
+        toolCallId: "search-1",
+        messages: [],
+        abortSignal: request.signal,
+        context: undefined,
+      },
+    );
+    expect(mocks.search).toHaveBeenCalledWith(
+      { q: "test query", num: 10 },
+      request.signal,
+    );
+    expect(results).toEqual([
+      {
+        title: "Example",
+        link: "https://example.com",
+        snippet: "Search summary",
+      },
+    ]);
   });
 });
