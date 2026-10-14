@@ -4,6 +4,22 @@ Independent Day 1 learning project extracted from [AI Hero — DeepSearch in Typ
 
 This snapshot includes the local changes for DeepSeek chat, QQ Mail email authentication, and rejecting unauthenticated chat requests. The original course code and this adaptation retain the upstream CC BY-NC-SA 4.0 license; see [LICENSE.md](LICENSE.md).
 
+## 每日聊天限流
+
+普通用户默认每天 1 次，可在 `.env` 中用 `DAILY_CHAT_LIMIT=1` 调整，修改后重启开发服务。按北京时间每天 00:00 重置。
+
+每个通过额度检查的 `/api/chat` 请求会在 `ai-app-template_chat_request` 中记录一次，包括之后生成失败的请求；一次请求中的多轮搜索不重复计数。超额请求返回 HTTP 429 和 `Retry-After`，不会调用模型或搜索。无效消息不占额度。
+
+运行 `pnpm db:push` 更新表结构，用 `pnpm db:studio` 查看请求记录。用户表中的 `isAdmin` 默认为 `false`；将自己的用户设为 `true` 可免限额，管理员请求仍会记录。不需要重新登录即可生效。
+
+数据库集成测试仅操作临时测试用户，并在结束后删除它们及其请求记录：
+
+```powershell
+$env:RUN_RATE_LIMIT_DB_TESTS = "1"
+pnpm exec vitest run src/server/chat-rate-limit.integration.test.ts
+Remove-Item Env:RUN_RATE_LIMIT_DB_TESTS
+```
+
 ## TODO
 
 Do related followup questions.

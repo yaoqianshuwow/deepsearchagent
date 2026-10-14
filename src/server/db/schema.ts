@@ -7,11 +7,10 @@ import {
   text,
   timestamp,
   varchar,
-  json,
   boolean,
   serial,
 } from "drizzle-orm/pg-core";
-import { type AdapterAccount } from "next-auth/adapters";
+import type { AdapterAccount } from "next-auth/adapters";
 import type { InferSelectModel, InferInsertModel } from "drizzle-orm";
 
 /**
@@ -39,6 +38,30 @@ export const users = createTable("user", {
 
 export const usersRelations = relations(users, ({ many }) => ({
   accounts: many(accounts),
+  chatRequests: many(chatRequests),
+}));
+
+export const chatRequests = createTable(
+  "chat_request",
+  {
+    id: serial("id").primaryKey(),
+    userId: varchar("user_id", { length: 255 })
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { mode: "date", withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (request) => ({
+    userDateIdx: index("chat_request_user_date_idx").on(
+      request.userId,
+      request.createdAt,
+    ),
+  }),
+);
+
+export const chatRequestsRelations = relations(chatRequests, ({ one }) => ({
+  user: one(users, { fields: [chatRequests.userId], references: [users.id] }),
 }));
 
 export const accounts = createTable(

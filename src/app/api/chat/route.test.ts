@@ -7,11 +7,13 @@ const mocks = vi.hoisted(() => ({
   stream: vi.fn(),
   response: vi.fn(),
   search: vi.fn(),
+  quota: vi.fn(),
 }));
 
 vi.mock("~/server/auth", () => ({ auth: mocks.auth }));
 vi.mock("~/model", () => ({ model: "test-model" }));
 vi.mock("~/serper", () => ({ searchSerper: mocks.search }));
+vi.mock("~/server/chat-rate-limit", () => ({ consumeChatQuota: mocks.quota }));
 vi.mock("ai", async (importOriginal) => ({
   ...(await importOriginal<typeof AISDK>()),
   APICallError: { isInstance: () => false },
@@ -26,6 +28,7 @@ import { POST } from "./route";
 describe("chat authentication", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    mocks.quota.mockResolvedValue({ status: "allowed" });
   });
 
   it("rejects anonymous requests before parsing the body or calling the model", async () => {
@@ -41,6 +44,7 @@ describe("chat authentication", () => {
     expect(await response.json()).toEqual({ error: "请先登录后再聊天" });
     expect(mocks.convert).not.toHaveBeenCalled();
     expect(mocks.stream).not.toHaveBeenCalled();
+    expect(mocks.quota).not.toHaveBeenCalled();
   });
 
   it("rejects a session without a user", async () => {
@@ -72,6 +76,7 @@ describe("chat authentication", () => {
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("stream");
     expect(mocks.convert).toHaveBeenCalledWith(messages);
+    expect(mocks.quota).toHaveBeenCalledWith("test-user");
     expect(mocks.stream).toHaveBeenCalledWith(
       expect.objectContaining({
         model: "test-model",
@@ -98,7 +103,11 @@ describe("chat authentication", () => {
     });
     const request = new Request("http://localhost/api/chat", {
       method: "POST",
-      body: JSON.stringify({ messages: [] }),
+      body: JSON.stringify({
+        messages: [
+          { id: "1", role: "user", parts: [{ type: "text", text: "Search" }] },
+        ],
+      }),
     });
     await POST(request);
     const options = mocks.stream.mock.calls[0]![0] as Parameters<
@@ -129,5 +138,65 @@ describe("chat authentication", () => {
         snippet: "Search summary",
       },
     ]);
+  });
+
+  it("returns 429 without calling the model when the daily quota is exhausted", async () => {
+    mocks.auth.mockResolvedValue({ user: { id: "test-user" } });
+    mocks.convert.mockResolvedValue([]);
+    mocks.quota.mockResolvedValue({
+      status: "limited",
+      limit: 1,
+      retryAfter: 60,
+    });
+    const response = await POST(
+      new Request("http://localhost/api/chat", {
+        method: "POST",
+        body: JSON.stringify({
+          messages: [
+            { id: "1", role: "user", parts: [{ type: "text", text: "Hi" }] },
+          ],
+        }),
+      }),
+    );
+    expect(response.status).toBe(429);
+    expect(response.headers.get("Retry-After")).toBe("60");
+    expect(await response.text()).toContain("今日聊天额度已用完");
+    expect(mocks.stream).not.toHaveBeenCalled();
+    expect(mocks.search).not.toHaveBeenCalled();
+  });
+
+  it("does not consume quota for malformed or empty requests", async () => {
+    mocks.auth.mockResolvedValue({ user: { id: "test-user" } });
+    for (const body of ["invalid JSON", JSON.stringify({ messages: [] })]) {
+      const response = await POST(
+        new Request("http://localhost/api/chat", { method: "POST", body }),
+      );
+      expect(response.status).toBe(400);
+    }
+    expect(mocks.quota).not.toHaveBeenCalled();
+    expect(mocks.stream).not.toHaveBeenCalled();
+  });
+
+  it("does not call the model when the quota database is unavailable", async () => {
+    mocks.auth.mockResolvedValue({ user: { id: "test-user" } });
+    mocks.convert.mockResolvedValue([]);
+    mocks.quota.mockRejectedValue(new Error("Database unavailable"));
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const response = await POST(
+        new Request("http://localhost/api/chat", {
+          method: "POST",
+          body: JSON.stringify({
+            messages: [
+              { id: "1", role: "user", parts: [{ type: "text", text: "Hi" }] },
+            ],
+          }),
+        }),
+      );
+      expect(response.status).toBe(503);
+      expect(mocks.stream).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+    }
   });
 });
