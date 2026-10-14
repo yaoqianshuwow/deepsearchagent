@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type * as AISDK from "ai";
+import { MockLanguageModelV4 } from "ai/test";
+import type { SearchChatMessage } from "~/types/chat";
 
 const mocks = vi.hoisted(() => ({
   auth: vi.fn(),
@@ -8,12 +10,18 @@ const mocks = vi.hoisted(() => ({
   response: vi.fn(),
   search: vi.fn(),
   quota: vi.fn(),
+  getChat: vi.fn(),
+  upsertChat: vi.fn(),
 }));
 
 vi.mock("~/server/auth", () => ({ auth: mocks.auth }));
 vi.mock("~/model", () => ({ model: "test-model" }));
 vi.mock("~/serper", () => ({ searchSerper: mocks.search }));
 vi.mock("~/server/chat-rate-limit", () => ({ consumeChatQuota: mocks.quota }));
+vi.mock("~/server/chats", () => ({
+  getChat: mocks.getChat,
+  upsertChat: mocks.upsertChat,
+}));
 vi.mock("ai", async (importOriginal) => ({
   ...(await importOriginal<typeof AISDK>()),
   APICallError: { isInstance: () => false },
@@ -198,5 +206,246 @@ describe("chat authentication", () => {
     } finally {
       log.mockRestore();
     }
+  });
+});
+
+describe("chat persistence", () => {
+  const messages: SearchChatMessage[] = [
+    {
+      id: "user-1",
+      role: "user",
+      parts: [{ type: "text", text: "第一个问题" }],
+    },
+  ];
+  const request = (body: unknown = { messages }) =>
+    new Request("http://localhost/api/chat", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  const responseOptions = () =>
+    mocks.response.mock
+      .calls[0]![0] as AISDK.UIMessageStreamOptions<SearchChatMessage> & {
+      headers: HeadersInit;
+    };
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mocks.auth.mockResolvedValue({ user: { id: "test-user" } });
+    mocks.quota.mockResolvedValue({ status: "allowed" });
+    mocks.convert.mockResolvedValue([]);
+    mocks.upsertChat.mockResolvedValue({});
+    mocks.response.mockImplementation(
+      (options: { headers: HeadersInit }) =>
+        new Response("stream", { headers: options.headers }),
+    );
+    mocks.stream.mockReturnValue({ toUIMessageStreamResponse: mocks.response });
+  });
+
+  it("saves before generation, uses the session's user, and returns the generated chat id", async () => {
+    const response = await POST(request({ messages, userId: "forged-user" }));
+    const chatId = response.headers.get("X-Chat-Id");
+    expect(chatId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(mocks.upsertChat).toHaveBeenCalledWith({
+      userId: "test-user",
+      chatId,
+      title: "第一个问题",
+      messages,
+    });
+    expect(mocks.upsertChat.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.stream.mock.invocationCallOrder[0]!,
+    );
+    expect(responseOptions().originalMessages).toEqual(messages);
+  });
+
+  it("reuses an owned chat id and preserves its title", async () => {
+    mocks.getChat.mockResolvedValue({
+      id: "existing-chat",
+      title: "原来的标题",
+    });
+    const response = await POST(request({ messages, chatId: "existing-chat" }));
+    expect(mocks.getChat).toHaveBeenCalledWith({
+      userId: "test-user",
+      chatId: "existing-chat",
+    });
+    expect(response.headers.get("X-Chat-Id")).toBe("existing-chat");
+    expect(mocks.upsertChat).toHaveBeenCalledWith({
+      userId: "test-user",
+      chatId: "existing-chat",
+      title: "原来的标题",
+      messages,
+    });
+  });
+
+  it("rejects a missing or inaccessible chat before consuming quota or saving", async () => {
+    mocks.getChat.mockResolvedValue(undefined);
+    expect(
+      (await POST(request({ messages, chatId: "other-user-chat" }))).status,
+    ).toBe(404);
+    expect(mocks.quota).not.toHaveBeenCalled();
+    expect(mocks.upsertChat).not.toHaveBeenCalled();
+    expect(mocks.stream).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid chat ids, invalid message parts and duplicate message ids without consuming quota", async () => {
+    for (const body of [
+      { messages, chatId: "" },
+      { messages, chatId: 123 },
+      { messages, chatId: "a".repeat(256) },
+      {
+        messages: [
+          { id: "1", role: "user", parts: [{ type: "text", text: 123 }] },
+        ],
+      },
+      { messages: [messages[0], messages[0]] },
+    ]) {
+      expect((await POST(request(body))).status).toBe(400);
+    }
+    expect(mocks.quota).not.toHaveBeenCalled();
+    expect(mocks.upsertChat).not.toHaveBeenCalled();
+    expect(mocks.stream).not.toHaveBeenCalled();
+  });
+
+  it("does not save when the quota is exhausted", async () => {
+    mocks.quota.mockResolvedValue({
+      status: "limited",
+      limit: 1,
+      retryAfter: 60,
+    });
+    expect((await POST(request())).status).toBe(429);
+    expect(mocks.upsertChat).not.toHaveBeenCalled();
+  });
+
+  it("does not start generation if the initial save fails", async () => {
+    mocks.upsertChat.mockRejectedValue(new Error("Database unavailable"));
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      expect((await POST(request())).status).toBe(503);
+      expect(mocks.stream).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it.each(["aborted", "failed", "cancelled"])(
+    "keeps the initial messages when the stream is %s",
+    async (status) => {
+      await POST(request());
+      const responseMessage: SearchChatMessage = {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [{ type: "text", text: "未完成" }],
+      };
+      await responseOptions().onEnd!({
+        messages: [...messages, responseMessage],
+        responseMessage,
+        isContinuation: false,
+        isAborted: status === "aborted",
+        ...(status === "cancelled" ? { isCancelled: true as const } : {}),
+        outcome: {
+          status:
+            status === "cancelled"
+              ? "unknown"
+              : (status as "aborted" | "failed"),
+        },
+      });
+      expect(mocks.upsertChat).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("uses the real SDK stream to save merged text and tool results with stable message ids", async () => {
+    const sdk = await vi.importActual<typeof AISDK>("ai");
+    mocks.convert.mockImplementation(sdk.convertToModelMessages);
+    const usage = {
+      inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+      outputTokens: { total: 1, text: 1, reasoning: 0 },
+    };
+    const testModel = new MockLanguageModelV4({
+      doStream: [
+        {
+          stream: sdk.simulateReadableStream({
+            chunks: [
+              { type: "stream-start", warnings: [] },
+              {
+                type: "tool-call",
+                toolCallId: "search-1",
+                toolName: "searchWeb",
+                input: JSON.stringify({ query: "问题" }),
+              },
+              {
+                type: "finish",
+                finishReason: { unified: "tool-calls", raw: "tool_calls" },
+                usage,
+              },
+            ],
+            initialDelayInMs: 0,
+            chunkDelayInMs: 0,
+          }),
+        },
+        {
+          stream: sdk.simulateReadableStream({
+            chunks: [
+              { type: "stream-start", warnings: [] },
+              { type: "text-start", id: "text-1" },
+              { type: "text-delta", id: "text-1", delta: "搜索后的回答" },
+              { type: "text-end", id: "text-1" },
+              {
+                type: "finish",
+                finishReason: { unified: "stop", raw: "stop" },
+                usage,
+              },
+            ],
+            initialDelayInMs: 0,
+            chunkDelayInMs: 0,
+          }),
+        },
+      ],
+    });
+    mocks.search.mockResolvedValue({
+      organic: [
+        { title: "来源", link: "https://example.com", snippet: "摘要" },
+      ],
+    });
+    mocks.stream.mockImplementation(
+      (options: Parameters<typeof AISDK.streamText>[0]) =>
+        sdk.streamText({ ...options, model: testModel }),
+    );
+    const response = await POST(request());
+    const wire = await response.text();
+    expect(mocks.upsertChat).toHaveBeenCalledTimes(2);
+    const finalSave = mocks.upsertChat.mock.calls[1]![0] as {
+      chatId: string;
+      messages: SearchChatMessage[];
+    };
+    expect(finalSave.chatId).toBe(response.headers.get("X-Chat-Id"));
+    expect(finalSave.messages).toHaveLength(2);
+    expect(finalSave.messages[0]).toEqual(messages[0]);
+    const assistant = finalSave.messages[1]!;
+    expect(assistant.role).toBe("assistant");
+    expect(assistant.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(wire).toContain(assistant.id);
+    expect(assistant.parts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "text", text: "搜索后的回答" }),
+        expect.objectContaining({
+          type: "tool-searchWeb",
+          toolCallId: "search-1",
+          state: "output-available",
+          input: { query: "问题" },
+          output: [
+            { title: "来源", link: "https://example.com", snippet: "摘要" },
+          ],
+        }),
+      ]),
+    );
+    expect(
+      await sdk.validateUIMessages({
+        messages: finalSave.messages,
+        tools: (
+          mocks.stream.mock.calls[0]![0] as Parameters<
+            typeof AISDK.streamText
+          >[0]
+        ).tools,
+      }),
+    ).toHaveLength(2);
   });
 });

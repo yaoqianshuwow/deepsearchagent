@@ -6,7 +6,7 @@ import {
   isStepCount,
   streamText,
   tool,
-  type UIMessage,
+  validateUIMessages,
 } from "ai";
 import { z } from "zod";
 
@@ -14,8 +14,32 @@ import { model } from "~/model";
 import { searchSerper } from "~/serper";
 import { auth } from "~/server/auth";
 import { consumeChatQuota } from "~/server/chat-rate-limit";
+import { getChat, upsertChat } from "~/server/chats";
+import type { SearchChatMessage } from "~/types/chat";
 
 export const maxDuration = 60;
+
+const requestSchema = z.object({
+  chatId: z.string().trim().min(1).max(255).optional(),
+  messages: z.array(z.unknown()).min(1),
+});
+
+const tools = {
+  searchWeb: tool({
+    description: "搜索网络，获取网页标题、链接和摘要，以回答问题并引用来源。",
+    inputSchema: z.object({
+      query: z.string().min(1).describe("The query to search the web for"),
+    }),
+    execute: async ({ query }, { abortSignal }) => {
+      const results = await searchSerper({ q: query, num: 10 }, abortSignal);
+      return results.organic.map(({ title, link, snippet }) => ({
+        title,
+        link,
+        snippet,
+      }));
+    },
+  }),
+};
 
 export async function POST(request: Request) {
   const session = await auth();
@@ -24,14 +48,48 @@ export async function POST(request: Request) {
   }
 
   let modelMessages;
+  let messages: SearchChatMessage[];
+  let chatId: string | undefined;
   try {
-    const { messages } = (await request.json()) as { messages: UIMessage[] };
-    if (!Array.isArray(messages) || messages.length === 0) {
-      return new Response("聊天消息不能为空", { status: 400 });
+    const body = requestSchema.parse(await request.json());
+    chatId = body.chatId;
+    messages = await validateUIMessages<SearchChatMessage>({
+      messages: body.messages,
+      tools,
+    });
+    const messageIds = new Set(messages.map((message) => message.id));
+    if (
+      messageIds.size !== messages.length ||
+      messages.some((message) => !message.id || message.id.length > 255)
+    ) {
+      return new Response("消息 ID 无效或重复", { status: 400 });
     }
     modelMessages = await convertToModelMessages(messages);
   } catch {
     return new Response("聊天消息格式无效", { status: 400 });
+  }
+
+  const userId = session.user.id;
+  const firstQuestion =
+    messages
+      .find((message) => message.role === "user")
+      ?.parts.filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join("")
+      .trim()
+      .slice(0, 100) ?? "";
+  let title = firstQuestion.length > 0 ? firstQuestion : "新聊天";
+  if (chatId) {
+    try {
+      const chat = await getChat({ userId, chatId });
+      if (!chat) {
+        return new Response("聊天不存在或无权访问", { status: 404 });
+      }
+      title = chat.title;
+    } catch (error) {
+      console.error("Chat lookup failed", error);
+      return new Response("暂时无法读取聊天，请稍后重试", { status: 503 });
+    }
   }
 
   let quota;
@@ -54,6 +112,15 @@ export async function POST(request: Request) {
     );
   }
 
+  const savedChatId = chatId ?? crypto.randomUUID();
+  try {
+    // Save the user message even if generation fails or the stream is cancelled.
+    await upsertChat({ userId, chatId: savedChatId, title, messages });
+  } catch (error) {
+    console.error("Chat save failed", error);
+    return new Response("暂时无法保存聊天，请稍后重试", { status: 503 });
+  }
+
   const result = streamText({
     model,
     system: `你是一个使用网络搜索回答问题的助手。
@@ -64,29 +131,27 @@ export async function POST(request: Request) {
     messages: modelMessages,
     abortSignal: request.signal,
     stopWhen: isStepCount(10),
-    tools: {
-      searchWeb: tool({
-        description:
-          "搜索网络，获取网页标题、链接和摘要，以回答问题并引用来源。",
-        inputSchema: z.object({
-          query: z.string().min(1).describe("The query to search the web for"),
-        }),
-        execute: async ({ query }, { abortSignal }) => {
-          const results = await searchSerper(
-            { q: query, num: 10 },
-            abortSignal,
-          );
-          return results.organic.map(({ title, link, snippet }) => ({
-            title,
-            link,
-            snippet,
-          }));
-        },
-      }),
-    },
+    tools,
   });
 
-  return result.toUIMessageStreamResponse({
+  return result.toUIMessageStreamResponse<SearchChatMessage>({
+    headers: { "X-Chat-Id": savedChatId },
+    originalMessages: messages,
+    generateMessageId: () => crypto.randomUUID(),
+    onEnd: async ({
+      messages: completedMessages,
+      isAborted,
+      isCancelled,
+      outcome,
+    }) => {
+      if (isAborted || isCancelled || outcome.status !== "completed") return;
+      await upsertChat({
+        userId,
+        chatId: savedChatId,
+        title,
+        messages: completedMessages,
+      });
+    },
     onError: (error) => {
       console.error(error);
       const cause = RetryError.isInstance(error) ? error.lastError : error;
