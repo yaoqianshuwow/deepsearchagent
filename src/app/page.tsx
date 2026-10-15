@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { z } from "zod";
 import { auth } from "~/server/auth/index.ts";
 import { getChat, getChats } from "~/server/chats";
 import { NewChatButton } from "~/components/new-chat-button";
@@ -10,12 +11,14 @@ import { AuthButton } from "../components/auth-button.tsx";
 export default async function HomePage({
   searchParams,
 }: {
-  searchParams: Promise<{ id?: string | string[] }>;
+  searchParams: Promise<{ id?: string | string[]; draft?: string | string[] }>;
 }) {
-  const { id } = await searchParams;
+  const { id, draft } = await searchParams;
   const chatIdFromUrl =
     typeof id === "string" && id.length > 0 ? id : undefined;
-  const chatId = chatIdFromUrl ?? crypto.randomUUID();
+  const draftId = z.string().uuid().safeParse(draft);
+  const chatId =
+    chatIdFromUrl ?? (draftId.success ? draftId.data : crypto.randomUUID());
   const session = await auth();
   const userName = session?.user?.name ?? session?.user?.email ?? "Guest";
   const isAuthenticated = !!session?.user;
