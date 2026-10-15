@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   getContext: vi.fn(),
   finishStream: vi.fn(),
   traceAttributes: vi.fn(),
+  scrape: vi.fn(),
 }));
 
 vi.mock("@langfuse/tracing", () => ({
@@ -27,6 +28,10 @@ vi.mock("@langfuse/tracing", () => ({
 vi.mock("~/server/auth", () => ({ auth: mocks.auth }));
 vi.mock("~/model", () => ({ model: "test-model" }));
 vi.mock("~/serper", () => ({ searchSerper: mocks.search }));
+vi.mock("~/server/scraper", () => ({
+  bulkCrawlWebsites: mocks.scrape,
+  MAX_CRAWL_URLS: 3,
+}));
 vi.mock("~/server/chat-rate-limit", () => ({ consumeChatQuota: mocks.quota }));
 vi.mock("~/server/chats", () => ({
   ChatAlreadyExistsError: class extends Error {},
@@ -286,6 +291,46 @@ describe("chat persistence", () => {
     mocks.stream.mockReturnValue({ toUIMessageStream: mocks.response });
   });
 
+  it("passes scrape URLs, cancellation and per-page failures through to the model", async () => {
+    const urls = ["https://example.com", "https://blocked.example"];
+    const output = {
+      success: false,
+      results: [
+        {
+          url: urls[0],
+          result: { success: true, data: "# 原文正文", truncated: false },
+        },
+        {
+          url: urls[1],
+          result: { success: false, error: "网站 robots.txt 不允许抓取该页面" },
+        },
+      ],
+    };
+    mocks.scrape.mockResolvedValue(output);
+    await POST(request());
+    const options = mocks.stream.mock.calls[0]![0] as Parameters<
+      typeof AISDK.streamText
+    >[0];
+    const scraper = options.tools!.scrapePages! as AISDK.Tool<
+      { urls: string[] },
+      typeof output
+    >;
+    const controller = new AbortController();
+    expect(
+      await scraper.execute!(
+        { urls },
+        {
+          toolCallId: "scrape-1",
+          messages: [],
+          abortSignal: controller.signal,
+          context: undefined,
+        },
+      ),
+    ).toEqual(output);
+    expect(mocks.scrape).toHaveBeenCalledWith(urls, controller.signal);
+    expect(options.system).toContain("scrapePages");
+  });
+
   it("saves before generation, uses the session's user, and preserves the supplied new chat id", async () => {
     const response = await POST(request({ messages, userId: "forged-user" }));
     const chatId = response.headers.get("X-Chat-Id");
@@ -461,7 +506,7 @@ describe("chat persistence", () => {
     },
   );
 
-  it("uses the real SDK stream to save merged text and tool results with stable message ids", async () => {
+  it("uses the real SDK stream to save search, scraped pages and text with stable message ids", async () => {
     const sdk = await vi.importActual<typeof AISDK>("ai");
     mocks.convert.mockImplementation(sdk.convertToModelMessages);
     const usage = {
@@ -479,6 +524,26 @@ describe("chat persistence", () => {
                 toolCallId: "search-1",
                 toolName: "searchWeb",
                 input: JSON.stringify({ query: "问题" }),
+              },
+              {
+                type: "finish",
+                finishReason: { unified: "tool-calls", raw: "tool_calls" },
+                usage,
+              },
+            ],
+            initialDelayInMs: 0,
+            chunkDelayInMs: 0,
+          }),
+        },
+        {
+          stream: sdk.simulateReadableStream({
+            chunks: [
+              { type: "stream-start", warnings: [] },
+              {
+                type: "tool-call",
+                toolCallId: "scrape-1",
+                toolName: "scrapePages",
+                input: JSON.stringify({ urls: ["https://example.com"] }),
               },
               {
                 type: "finish",
@@ -514,12 +579,24 @@ describe("chat persistence", () => {
         { title: "来源", link: "https://example.com", snippet: "摘要" },
       ],
     });
+    mocks.scrape.mockResolvedValue({
+      success: true,
+      results: [
+        {
+          url: "https://example.com",
+          result: { success: true, data: "# 网页正文", truncated: false },
+        },
+      ],
+    });
     mocks.stream.mockImplementation(
       (options: Parameters<typeof AISDK.streamText>[0]) =>
         sdk.streamText({ ...options, model: testModel }),
     );
     const response = await POST(request());
     const wire = await response.text();
+    expect(mocks.search.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.scrape.mock.invocationCallOrder[0]!,
+    );
     expect(mocks.upsertChat).toHaveBeenCalledTimes(2);
     expect(mocks.finishStream).toHaveBeenCalledWith(
       expect.any(String),
@@ -553,6 +630,21 @@ describe("chat persistence", () => {
           output: [
             { title: "来源", link: "https://example.com", snippet: "摘要" },
           ],
+        }),
+        expect.objectContaining({
+          type: "tool-scrapePages",
+          toolCallId: "scrape-1",
+          state: "output-available",
+          input: { urls: ["https://example.com"] },
+          output: {
+            success: true,
+            results: [
+              {
+                url: "https://example.com",
+                result: { success: true, data: "# 网页正文", truncated: false },
+              },
+            ],
+          },
         }),
       ]),
     );

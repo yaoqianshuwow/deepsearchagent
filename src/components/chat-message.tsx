@@ -1,6 +1,7 @@
 import ReactMarkdown, { type Components } from "react-markdown";
-import { LoaderCircle, Search } from "lucide-react";
+import { Globe, LoaderCircle, Search } from "lucide-react";
 import type { MessagePart } from "~/types/chat";
+import type { CrawlResponse } from "~/server/scraper";
 
 interface ChatMessageProps {
   parts: MessagePart[];
@@ -105,6 +106,70 @@ const SearchToolCall = ({
   );
 };
 
+const ScrapeToolCall = ({
+  part,
+}: {
+  part: Extract<MessagePart, { type: "tool-scrapePages" }>;
+}) => {
+  const pages: { url: string; result?: CrawlResponse }[] =
+    part.state === "output-available"
+      ? part.output.results
+      : (part.input?.urls ?? [])
+          .filter((url): url is string => typeof url === "string")
+          .map((url) => ({ url }));
+  const pending =
+    part.state === "input-streaming" || part.state === "input-available";
+  const status = pending
+    ? "正在读取网页正文…"
+    : part.state === "output-available"
+      ? `网页读取完成，${part.output.results.filter(({ result }) => result.success).length}/${part.output.results.length} 个成功`
+      : part.state === "output-error"
+        ? "网页读取失败，请稍后重试"
+        : part.state === "output-denied"
+          ? "网页读取已取消"
+          : "网页读取等待确认";
+  return (
+    <div className="my-3 rounded-lg border border-gray-600 bg-gray-900 p-3 text-sm">
+      <div className="flex items-center gap-2" role="status">
+        {pending ? (
+          <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />
+        ) : (
+          <Globe className="size-4" aria-hidden="true" />
+        )}
+        <span>{status}</span>
+      </div>
+      <ul className="mt-2 space-y-2">
+        {pages.map((item, index) => (
+          <li key={`${item.url}-${index}`} className="break-words">
+            <a
+              className="text-blue-400 underline"
+              href={/^https?:\/\//i.test(item.url) ? item.url : undefined}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              {item.url}
+            </a>
+            {item.result &&
+              (item.result.success ? (
+                <details className="mt-1">
+                  <summary className="cursor-pointer text-gray-400">
+                    查看已读取正文
+                    {item.result.truncated ? "（内容已截断）" : ""}
+                  </summary>
+                  <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap text-xs text-gray-400">
+                    {item.result.data}
+                  </pre>
+                </details>
+              ) : (
+                <p className="mt-1 text-amber-300">{item.result.error}</p>
+              ))}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+};
+
 export const ChatMessage = ({ parts, role, userName }: ChatMessageProps) => {
   const isAI = role === "assistant";
 
@@ -129,6 +194,9 @@ export const ChatMessage = ({ parts, role, userName }: ChatMessageProps) => {
           }
           if (part.type === "tool-searchWeb") {
             return <SearchToolCall key={part.toolCallId} part={part} />;
+          }
+          if (part.type === "tool-scrapePages") {
+            return <ScrapeToolCall key={part.toolCallId} part={part} />;
           }
           return null;
         })}

@@ -55,7 +55,7 @@ pnpm typecheck
 pnpm exec eslint src/app/api/chat/route.ts src/app/api/chat/route.test.ts
 ```
 
-预期接口测试 20 项通过，覆盖登录、限流、消息校验、归属检查、生成前保存、保存失败、新建 ID 冲突、Redis 不可用、活动生成冲突、中断和真实 SDK 多轮搜索消息合并。
+预期接口测试 21 项通过，覆盖登录、限流、消息校验、归属检查、生成前保存、保存失败、新建 ID 冲突、Redis 不可用、活动生成冲突、中断和真实 SDK 搜索、正文抓取消息合并。
 
 手动验收：运行 `pnpm dev` 和 `pnpm db:studio`，登录后发送一条问题。在浏览器开发者工具的 Network 中查看 `/api/chat` 响应头的 `X-Chat-Id`；用该 ID 在 `ai-app-template_chat` 和 `ai-app-template_message` 表中查找记录。生成前已有用户消息；正常回复后应同时有用户和 AI 消息，AI 的 `parts` 包含搜索结果和回答，`order` 分别是 0、1。真实请求会消耗每日聊天额度及模型/搜索余额。
 
@@ -63,7 +63,7 @@ pnpm exec eslint src/app/api/chat/route.ts src/app/api/chat/route.test.ts
 
 服务端 `page.tsx` 从异步 `searchParams` 读取 `?id=...`，传给 `ChatPage`。前端通过 `DefaultChatTransport` 在请求体传递 `chatId`。接口创建聊天后先发送临时 `data-chat-created` 事件，再继续发送模型回复。前端在 `onData` 中接收通知并导航到 `?id=新ID`，保持聊天 hook 的身份不变，让正在生成的回复继续；下一次发送复用这个 ID。通知不写入消息历史，`X-Chat-Id` 响应头继续保留。第五题把首次请求改为预先生成稳定 ID，并额外发送 `isNewChat=true`。
 
-自动验收：运行 `pnpm exec vitest run src/app/api/chat/route.test.ts`（20 项通过）及 `pnpm typecheck`。接口测试确认新聊天通知在回复文本前发送、续聊不重复通知，通知不进入保存的消息。
+自动验收：运行 `pnpm exec vitest run src/app/api/chat/route.test.ts`（21 项通过）及 `pnpm typecheck`。接口测试确认新聊天通知在回复文本前发送、续聊不重复通知，通知不进入保存的消息。
 
 手动验收：
 
@@ -154,6 +154,34 @@ Langfuse 的 `environment` 从服务的 `NODE_ENV` 设置，本地 `pnpm dev` �
 5. 打开一条包含搜索的记录，检查工具和后续模型调用也关联到同一用户、聊天。恢复正在生成的回复不会新增一轮生成。
 
 真实聊天仍消耗原有额度与模型、搜索用量，普通用户每天默认只有一次；多轮验收需要有剩余额度的账号或已有管理员账号。自动测试不消耗这些用量，也不上传真实聊天。运行 `pnpm check`、`pnpm exec vitest run`；测试覆盖新建/续聊使用正确身份、不能伪造用户、拒绝请求不进入生成追踪，以及两名用户并发流式生成后的字段隔离和环境上传。
+
+## Day 3：第三题——读取网页正文
+
+助手新增 `scrapePages({ urls })` 工具。搜索后会尝试打开相关来源，提取正文为 Markdown 再回答；用户提供网址要求阅读时，也可直接抓取。工具保留每个 URL 的成功内容或失败原因，部分网页失败不会丢掉其他网页的成功结果。网页上的指令只作为资料，不应执行。只能使用搜索摘要时，助手应明确说明没有读到原文。
+
+`src/server/scraper.ts` 使用 Cheerio 去掉导航、脚本、页头页脚等元素，优先提取 article、main 等正文区域，使用 Turndown 转为 Markdown。支持 HTTP/HTML 中声明的字符编码，并将正文的相对链接转换为绝对链接。不会运行网页 JavaScript，也不绕过登录墙和验证码；只支持 HTML，不读取 PDF、图片等文件。
+
+抓取前按实际使用的 `DeepSearchAgent` User-Agent 检查 robots.txt；404/410 表示没有规则，允许继续；禁止访问、无法读取规则等情况会返回错误。跳转后的页面也检查其 robots 规则。429、5xx 和网络错误最多尝试三次，重试等待 0.5 秒、1 秒；403 等永久错误不重试。只接受公网 HTTP/HTTPS 和标准端口，检查 IP、DNS 解析及每次跳转，连接使用校验过的 DNS 地址，防止访问本机、内网或云元数据地址。
+
+每次工具调用最多三个 URL，并发抓取；每个网页总预算 20 秒，单次 HTTP 请求 8 秒，HTML 最多 2 MiB。正文最多返回 20,000 字符，超过时 `truncated=true`，界面和提示词都会标明截断。`cacheWithRedis` 新增可选的缓存键和缓存条件设置：正文只按去掉片段标识的 URL 缓存六小时，不把 AbortSignal 放进缓存键，不缓存失败和取消；原搜索缓存行为保持原样。
+
+聊天页面会显示“正在读取网页正文”、成功数量、来源 URL；可以展开查看正文，失败页面直接显示原因。工具调用、正文结果和错误随消息一起保存，刷新后仍能查看，也会通过第一、二题的 Langfuse 集成记录在对应用户和聊天下。
+
+验收步骤（真实提问正常消耗聊天额度和模型/搜索用量）：
+
+1. 重启后登录 [本地应用](http://localhost:3000)，发送：“请使用 scrapePages 读取 https://example.com/ 的网页正文，用中文说明这页的用途，并引用原链接。”
+2. 页面应出现网页读取卡片；成功后展开“查看已读取正文”，应看到英文正文。最终回答应依据正文并附上来源。该域名只用于一次演示，不要定期轮询。
+3. 刷新该聊天，确认读取卡片、正文和回答仍在。去 Langfuse 查看该聊天，确认有 `scrapePages` 工具输入、结果以及读取后的模型调用。
+4. 有剩余额度时，可在同一聊天要求“尝试读取 http://127.0.0.1/ 并说明结果”。页面应显示拒绝本机/内网地址，不能访问本地服务，也不能假装成功。
+5. 同一 URL 再次抓取会命中六小时缓存；开发日志会出现 `Cache hit for crawlWebsite:v1:...`。缓存命中仍会正常记录本次工具调用。
+
+自动检查：`pnpm check`、`pnpm exec vitest run`。测试覆盖正文提取、中文编码、robots、跳转限制、私网地址和 DNS 检查、重试、取消、内容长度、成功缓存、混合结果、界面展示和真实 SDK 多工具消息保存。联网测试默认跳过；需要时运行下面的命令验证公网读取及真实 Redis 缓存，不调用模型、不扣聊天额度。联网测试会写入示例网页的六小时缓存。
+
+```powershell
+$env:RUN_SCRAPER_LIVE_TESTS = "1"
+try { pnpm exec vitest run src/server/scraper.live.test.ts }
+finally { Remove-Item Env:RUN_SCRAPER_LIVE_TESTS }
+```
 
 ## 后续待办
 
