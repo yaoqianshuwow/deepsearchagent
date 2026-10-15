@@ -111,6 +111,32 @@ Redis 是恢复功能的必要条件；初始化连接失败返回 503，不消�
 
 自动检查：`pnpm typecheck`；`RUN_CHAT_DB_TESTS=1` 下运行 `pnpm exec vitest run`，包含真实数据库权限、活动生成并发，以及恢复接口的未登录、跨用户访问、完成时机竞争、过期流和 Redis 故障测试。恢复本身不额外计费，手动开始新一轮聊天仍消耗正常额度。
 
+## Day 3：第一题——接入 Langfuse
+
+Langfuse 用来查看助手每次调用模型、搜索工具的过程，包括问题、回答、搜索参数与结果、耗时和 token 使用量。运行记录会发送到你配置的 Langfuse 服务。当前项目使用 AI SDK 7，按新版官方集成使用 `@langfuse/vercel-ai-sdk`，替代教程旧版的 `langfuse-vercel` 和 `experimental_telemetry`。
+
+在 Langfuse 后台进入你的项目，在 Settings → API Keys 创建或复制连接配置，填入本地 `.env`（密钥不提交到 Git）：
+
+```dotenv
+LANGFUSE_PUBLIC_KEY="从后台复制 Public Key"
+LANGFUSE_SECRET_KEY="从后台复制 Secret Key"
+LANGFUSE_BASE_URL="从后台复制该项目所在区域的服务地址"
+```
+
+注意新版变量名是 `LANGFUSE_BASE_URL`，与旧教程中的 `LANGFUSE_BASEURL` 不同。三个值全空时聊天仍可使用，但不会上传记录；只填一部分会在启动时提示配置不完整。新增或修改配置后需要重启 `pnpm dev`。
+
+`src/instrumentation.ts` 只在 Node.js 服务启动时注册 OpenTelemetry 和 Langfuse 集成，聊天的 `streamText` 使用 `telemetry` 开启记录。结束的 span 立即发送，适用于当前后台消费、可恢复的生成流程；Langfuse 上传失败不应打断正常聊天。当前只完成基础记录，按用户和聊天 ID 分类属于下一题。
+
+验收步骤：
+
+1. 配置 `.env` 并重启服务，确认日志出现 `[Langfuse] 已开启模型与工具调用记录。`。
+2. 登录 [本地应用](http://localhost:3000)，新建聊天，发送“搜索 TypeScript 的官方网站，说明它是什么，并给出来源链接”。这会正常消耗一条聊天额度及模型、搜索用量。
+3. 回答结束后，打开同一个 Langfuse 项目的 Tracing / Traces 列表，必要时刷新或稍等片刻。
+4. 打开刚生成的记录，确认能看到 `deepsearch-agent`、模型调用、`searchWeb` 的搜索参数与返回结果、最终回答、耗时及 token 用量。费用显示取决于平台是否支持对应模型的价格。
+5. 若无记录，先检查启动日志是否提示未配置，再确认密钥、服务地址属于同一个 Langfuse 项目；检查 `logs/dev.stderr.log` 的上传错误。
+
+自动检查：`pnpm check`、`pnpm exec vitest run`。`src/instrumentation.test.ts` 使用模拟模型和本地 HTTP 接收端，验证模型 → 工具 → 模型的真实 SDK 遥测能发送到配置的地址，并覆盖未配置、配置不完整和 Edge 跳过初始化的情况；不消耗模型余额、不向真实 Langfuse 上传数据。真实 Langfuse 后台验收需要填入有效配置。
+
 ## 后续待办
 
 Do related followup questions.

@@ -158,6 +158,7 @@ export async function POST(request: Request) {
   const generationController = new AbortController();
   const result = streamText({
     model,
+    telemetry: { isEnabled: true, functionId: "deepsearch-agent" },
     system: `你是一个使用网络搜索回答问题的助手。
 每次回答用户问题前，都应先调用 searchWeb 搜索相关信息。
 根据搜索结果的摘要回答，用 [来源名称](链接) 在相关句子旁引用来源。

@@ -116,6 +116,7 @@ describe("chat authentication", () => {
       expect.objectContaining({
         model: "test-model",
         messages: modelMessages,
+        telemetry: { isEnabled: true, functionId: "deepsearch-agent" },
       }),
     );
   });
