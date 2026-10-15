@@ -14,6 +14,14 @@ const mocks = vi.hoisted(() => ({
   upsertChat: vi.fn(),
   getContext: vi.fn(),
   finishStream: vi.fn(),
+  traceAttributes: vi.fn(),
+}));
+
+vi.mock("@langfuse/tracing", () => ({
+  propagateAttributes: <T>(attributes: unknown, run: () => T): T => {
+    mocks.traceAttributes(attributes);
+    return run();
+  },
 }));
 
 vi.mock("~/server/auth", () => ({ auth: mocks.auth }));
@@ -80,6 +88,7 @@ describe("chat authentication", () => {
     expect(mocks.convert).not.toHaveBeenCalled();
     expect(mocks.stream).not.toHaveBeenCalled();
     expect(mocks.quota).not.toHaveBeenCalled();
+    expect(mocks.traceAttributes).not.toHaveBeenCalled();
   });
 
   it("rejects a session without a user", async () => {
@@ -112,6 +121,11 @@ describe("chat authentication", () => {
     expect(await response.text()).toContain('"type":"data-chat-created"');
     expect(mocks.convert).toHaveBeenCalledWith(messages);
     expect(mocks.quota).toHaveBeenCalledWith("test-user");
+    expect(mocks.traceAttributes).toHaveBeenCalledExactlyOnceWith({
+      userId: "test-user",
+      sessionId: newChatId,
+      traceName: "chat",
+    });
     expect(mocks.stream).toHaveBeenCalledWith(
       expect.objectContaining({
         model: "test-model",
@@ -288,6 +302,11 @@ describe("chat persistence", () => {
     expect(mocks.upsertChat.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.stream.mock.invocationCallOrder[0]!,
     );
+    expect(mocks.traceAttributes).toHaveBeenCalledExactlyOnceWith({
+      userId: "test-user",
+      sessionId: chatId,
+      traceName: "chat",
+    });
     expect(responseOptions().originalMessages).toEqual(messages);
     expect(await response.text()).toContain(
       JSON.stringify({
@@ -311,6 +330,11 @@ describe("chat persistence", () => {
       chatId: "existing-chat",
     });
     expect(response.headers.get("X-Chat-Id")).toBe("existing-chat");
+    expect(mocks.traceAttributes).toHaveBeenCalledExactlyOnceWith({
+      userId: "test-user",
+      sessionId: "existing-chat",
+      traceName: "chat",
+    });
     expect(mocks.upsertChat).toHaveBeenCalledWith(
       expect.objectContaining({
         userId: "test-user",
@@ -335,6 +359,7 @@ describe("chat persistence", () => {
     expect(mocks.quota).not.toHaveBeenCalled();
     expect(mocks.upsertChat).not.toHaveBeenCalled();
     expect(mocks.stream).not.toHaveBeenCalled();
+    expect(mocks.traceAttributes).not.toHaveBeenCalled();
   });
 
   it("rejects invalid chat ids, invalid message parts and duplicate message ids without consuming quota", async () => {
@@ -375,6 +400,7 @@ describe("chat persistence", () => {
     try {
       expect((await POST(request())).status).toBe(503);
       expect(mocks.stream).not.toHaveBeenCalled();
+      expect(mocks.traceAttributes).not.toHaveBeenCalled();
     } finally {
       log.mockRestore();
     }
@@ -402,6 +428,7 @@ describe("chat persistence", () => {
     mocks.upsertChat.mockRejectedValue(new ChatAlreadyExistsError());
     expect((await POST(request())).status).toBe(409);
     expect(mocks.stream).not.toHaveBeenCalled();
+    expect(mocks.traceAttributes).not.toHaveBeenCalled();
   });
 
   it.each(["aborted", "failed", "cancelled"])(

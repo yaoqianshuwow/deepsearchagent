@@ -125,7 +125,7 @@ LANGFUSE_BASE_URL="从后台复制该项目所在区域的服务地址"
 
 注意新版变量名是 `LANGFUSE_BASE_URL`，与旧教程中的 `LANGFUSE_BASEURL` 不同。三个值全空时聊天仍可使用，但不会上传记录；只填一部分会在启动时提示配置不完整。新增或修改配置后需要重启 `pnpm dev`。
 
-`src/instrumentation.ts` 只在 Node.js 服务启动时注册 OpenTelemetry 和 Langfuse 集成，聊天的 `streamText` 使用 `telemetry` 开启记录。结束的 span 立即发送，适用于当前后台消费、可恢复的生成流程；Langfuse 上传失败不应打断正常聊天。当前只完成基础记录，按用户和聊天 ID 分类属于下一题。
+`src/instrumentation.ts` 只在 Node.js 服务启动时注册 OpenTelemetry 和 Langfuse 集成，聊天的 `streamText` 使用 `telemetry` 开启记录。结束的 span 立即发送，适用于当前后台消费、可恢复的生成流程；Langfuse 上传失败不应打断正常聊天。按用户和聊天 ID 分类见下面第二题。
 
 验收步骤：
 
@@ -136,6 +136,24 @@ LANGFUSE_BASE_URL="从后台复制该项目所在区域的服务地址"
 5. 若无记录，先检查启动日志是否提示未配置，再确认密钥、服务地址属于同一个 Langfuse 项目；检查 `logs/dev.stderr.log` 的上传错误。
 
 自动检查：`pnpm check`、`pnpm exec vitest run`。`src/instrumentation.test.ts` 使用模拟模型和本地 HTTP 接收端，验证模型 → 工具 → 模型的真实 SDK 遥测能发送到配置的地址，并覆盖未配置、配置不完整和 Edge 跳过初始化的情况；不消耗模型余额、不向真实 Langfuse 上传数据。真实 Langfuse 后台验收需要填入有效配置。
+
+## Day 3：第二题——按用户、聊天和环境查看运行记录
+
+每次聊天生成在 `propagateAttributes` 的异步上下文中开始，记录名称为 `chat`。`userId` 来自服务端登录会话，`sessionId` 使用通过权限检查并成功保存的聊天 ID；请求体里的 `userId` 不会被采用。模型、搜索工具以及同一次生成的后续步骤都会带上这些字段。不同用户并发生成时，字段不会混用。一次聊天中的多次提问分别产生记录，但使用相同的 `sessionId` 聚合；新建聊天使用新的 ID。
+
+Langfuse 的 `environment` 从服务的 `NODE_ENV` 设置，本地 `pnpm dev` 是 `development`，正式构建运行时是 `production`，无需新增密钥。未登录、无权限、限流或首次保存失败的请求不会进入模型生成的追踪上下文。刷新和恢复回复仍接回原来的后台生成，不创建新的模型调用记录。这里没有添加数据库操作的 span，数据库追踪属于后续题目。
+
+新版 SDK 使用第一题的即时上传机制，无需再调用旧教程的 `langfuse.flushAsync()`。旧记录不会自动补上用户、会话和环境，需要发送新消息验收。
+
+验收步骤：
+
+1. 重启后登录本地应用，打开一个聊天并发送问题。
+2. 打开 Langfuse 的 Tracing 页面，找到最新的生成记录，在详情或表格列设置中查看 `Trace Name`、`User ID`、`Session ID` 和 `Environment`：应分别为 `chat`、当前登录用户的内部 ID、浏览器网址 `?id=` 后的聊天 ID、`development`。用户 ID 是内部 ID，不是邮箱。
+3. 在同一个聊天继续发送一条消息，两次生成的 `Session ID` 应相同；按该 ID 筛选或进入 Sessions 查看，能把两轮记录归到一起。
+4. 点击 `+` 新建聊天再提问，`Session ID` 应改变，`User ID` 保持相同。换另一个账号时，`User ID` 应改变。
+5. 打开一条包含搜索的记录，检查工具和后续模型调用也关联到同一用户、聊天。恢复正在生成的回复不会新增一轮生成。
+
+真实聊天仍消耗原有额度与模型、搜索用量，普通用户每天默认只有一次；多轮验收需要有剩余额度的账号或已有管理员账号。自动测试不消耗这些用量，也不上传真实聊天。运行 `pnpm check`、`pnpm exec vitest run`；测试覆盖新建/续聊使用正确身份、不能伪造用户、拒绝请求不进入生成追踪，以及两名用户并发流式生成后的字段隔离和环境上传。
 
 ## 后续待办
 

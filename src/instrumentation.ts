@@ -38,6 +38,7 @@ export async function register() {
         publicKey: env.LANGFUSE_PUBLIC_KEY,
         secretKey: env.LANGFUSE_SECRET_KEY,
         baseUrl: env.LANGFUSE_BASE_URL,
+        environment: env.NODE_ENV,
         // Resumable generations run in the background; export ended spans
         // immediately, including failures, without waiting on a response hook.
         exportMode: "immediate",

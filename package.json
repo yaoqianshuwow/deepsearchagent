@@ -24,6 +24,7 @@
     "@ai-sdk/react": "^4.0.140",
     "@auth/drizzle-adapter": "^1.7.2",
     "@langfuse/otel": "^6.0.0",
+    "@langfuse/tracing": "^6.0.0",
     "@langfuse/vercel-ai-sdk": "^6.0.0",
     "@opentelemetry/api": "^1.9.1",
     "@t3-oss/env-nextjs": "^0.10.1",

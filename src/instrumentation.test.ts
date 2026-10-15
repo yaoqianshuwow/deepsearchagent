@@ -4,11 +4,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { isStepCount, simulateReadableStream, streamText, tool } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import { z } from "zod";
+import { propagateAttributes } from "@langfuse/tracing";
 
 const config = vi.hoisted(() => ({
   LANGFUSE_PUBLIC_KEY: undefined as string | undefined,
   LANGFUSE_SECRET_KEY: undefined as string | undefined,
   LANGFUSE_BASE_URL: undefined as string | undefined,
+  NODE_ENV: "test",
 }));
 vi.mock("./env.js", () => ({ env: config }));
 
@@ -120,21 +122,66 @@ describe("Langfuse instrumentation", () => {
           },
         ],
       });
-      const result = streamText({
-        model,
-        prompt: "trace-test-question",
-        telemetry: { isEnabled: true, functionId: "deepsearch-agent" },
-        stopWhen: isStepCount(3),
-        tools: {
-          searchWeb: tool({
-            inputSchema: z.object({ query: z.string() }),
-            execute: async () => [
-              { title: "trace-test-source", link: "https://example.com" },
-            ],
-          }),
+      const result = propagateAttributes(
+        {
+          userId: "trace-test-user",
+          sessionId: "trace-test-chat",
+          traceName: "chat",
         },
-      });
-      await result.consumeStream();
+        () =>
+          streamText({
+            model,
+            prompt: "trace-test-question",
+            telemetry: { isEnabled: true, functionId: "deepsearch-agent" },
+            stopWhen: isStepCount(3),
+            tools: {
+              searchWeb: tool({
+                inputSchema: z.object({ query: z.string() }),
+                execute: async () => [
+                  { title: "trace-test-source", link: "https://example.com" },
+                ],
+              }),
+            },
+          }),
+      );
+      // Start another user's generation before consuming either stream. Both
+      // streams continue after propagateAttributes has returned to its caller.
+      const otherResult = propagateAttributes(
+        {
+          userId: "another-test-user",
+          sessionId: "another-test-chat",
+          traceName: "chat",
+        },
+        () =>
+          streamText({
+            model: new MockLanguageModelV4({
+              doStream: {
+                stream: simulateReadableStream({
+                  chunks: [
+                    { type: "stream-start", warnings: [] },
+                    { type: "text-start", id: "other-text" },
+                    {
+                      type: "text-delta",
+                      id: "other-text",
+                      delta: "another-test-answer",
+                    },
+                    { type: "text-end", id: "other-text" },
+                    {
+                      type: "finish",
+                      finishReason: { unified: "stop", raw: "stop" },
+                      usage,
+                    },
+                  ],
+                  initialDelayInMs: 0,
+                  chunkDelayInMs: 0,
+                }),
+              },
+            }),
+            prompt: "another-test-question",
+            telemetry: { isEnabled: true, functionId: "deepsearch-agent" },
+          }),
+      );
+      await Promise.all([result.consumeStream(), otherResult.consumeStream()]);
       expect(await result.text).toBe("trace-test-answer");
       await vi.waitFor(
         () => {
@@ -144,6 +191,28 @@ describe("Langfuse instrumentation", () => {
           expect(body).toContain("trace-test-source");
           expect(body).toContain("trace-test-answer");
           expect(body).toContain("deepsearch-agent");
+          expect(body).toContain("trace-test-user");
+          expect(body).toContain("trace-test-chat");
+          expect(body).toContain("langfuse.environment");
+          expect(body).toContain("test");
+          expect(body).toContain("another-test-answer");
+          const firstUser = received.filter((item) =>
+            item.body.includes("trace-test-user"),
+          );
+          const secondUser = received.filter((item) =>
+            item.body.includes("another-test-user"),
+          );
+          expect(firstUser.length).toBeGreaterThan(2);
+          expect(secondUser.length).toBeGreaterThan(0);
+          for (const item of firstUser) {
+            expect(item.body).toContain("trace-test-chat");
+            expect(item.body).not.toContain("another-test-chat");
+            expect(item.body).toContain("langfuse.trace.name");
+          }
+          for (const item of secondUser) {
+            expect(item.body).toContain("another-test-chat");
+            expect(item.body).not.toContain("trace-test-chat");
+          }
         },
         { timeout: 5000 },
       );
