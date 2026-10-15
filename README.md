@@ -55,7 +55,7 @@ pnpm typecheck
 pnpm exec eslint src/app/api/chat/route.ts src/app/api/chat/route.test.ts
 ```
 
-预期接口测试 18 项通过，覆盖登录、限流、消息校验、归属检查、生成前保存、保存失败、新建 ID 冲突、中断和真实 SDK 多轮搜索消息合并。
+预期接口测试 20 项通过，覆盖登录、限流、消息校验、归属检查、生成前保存、保存失败、新建 ID 冲突、Redis 不可用、活动生成冲突、中断和真实 SDK 多轮搜索消息合并。
 
 手动验收：运行 `pnpm dev` 和 `pnpm db:studio`，登录后发送一条问题。在浏览器开发者工具的 Network 中查看 `/api/chat` 响应头的 `X-Chat-Id`；用该 ID 在 `ai-app-template_chat` 和 `ai-app-template_message` 表中查找记录。生成前已有用户消息；正常回复后应同时有用户和 AI 消息，AI 的 `parts` 包含搜索结果和回答，`order` 分别是 0、1。真实请求会消耗每日聊天额度及模型/搜索余额。
 
@@ -63,7 +63,7 @@ pnpm exec eslint src/app/api/chat/route.ts src/app/api/chat/route.test.ts
 
 服务端 `page.tsx` 从异步 `searchParams` 读取 `?id=...`，传给 `ChatPage`。前端通过 `DefaultChatTransport` 在请求体传递 `chatId`。接口创建聊天后先发送临时 `data-chat-created` 事件，再继续发送模型回复。前端在 `onData` 中接收通知并导航到 `?id=新ID`，保持聊天 hook 的身份不变，让正在生成的回复继续；下一次发送复用这个 ID。通知不写入消息历史，`X-Chat-Id` 响应头继续保留。第五题把首次请求改为预先生成稳定 ID，并额外发送 `isNewChat=true`。
 
-自动验收：运行 `pnpm exec vitest run src/app/api/chat/route.test.ts`（18 项通过）及 `pnpm typecheck`。接口测试确认新聊天通知在回复文本前发送、续聊不重复通知，通知不进入保存的消息。
+自动验收：运行 `pnpm exec vitest run src/app/api/chat/route.test.ts`（20 项通过）及 `pnpm typecheck`。接口测试确认新聊天通知在回复文本前发送、续聊不重复通知，通知不进入保存的消息。
 
 手动验收：
 
@@ -78,7 +78,7 @@ pnpm exec eslint src/app/api/chat/route.ts src/app/api/chat/route.test.ts
 
 服务端按登录用户查询真实聊天列表，并在有 `?id=...` 时加载该聊天的消息。前端以 SDK 的 `messages` 参数初始化历史；切换聊天、刷新页面可恢复原消息。列表按最近更新时间排列，当前聊天高亮。不存在或不属于当前用户的聊天显示“聊天不存在或无权访问”，可返回首页；未登录不读取私人聊天。
 
-首页无 ID 时生成 UUID；点击 `+` 时通过客户端路由进入 `/?draft=新UUID`，由服务端校验并复用该草稿 ID。这个 ID 同时作为 `ChatPage` 的 `key`、SDK 聊天 ID 和接口 `chatId`。首次保存后网址改为 `?id=同一ID`，组件不会重建，流式回答继续。每次点击 `+` 都使用新的草稿 ID，清空旧消息、输入和错误，不提交表单、不整页刷新，也避免复用缓存中的旧 ID。只点 `+` 不创建空聊天，也不会删除旧聊天。生成途中切换聊天会停止当前前端请求，生成前保存的问题仍保留；刷新后续接未完成生成属于第七题。
+首页无 ID 时生成 UUID；点击 `+` 时通过客户端路由进入 `/?draft=新UUID`，由服务端校验并复用该草稿 ID。这个 ID 同时作为 `ChatPage` 的 `key`、SDK 聊天 ID 和接口 `chatId`。首次保存后网址改为 `?id=同一ID`，组件不会重建，流式回答继续。每次点击 `+` 都使用新的草稿 ID，清空旧消息、输入和错误，不提交表单、不整页刷新，也避免复用缓存中的旧 ID。只点 `+` 不创建空聊天，也不会删除旧聊天。接入第七题后，生成途中切换聊天只断开当前页面的连接，后台生成继续，返回聊天后可恢复。
 
 验收步骤：
 
@@ -87,7 +87,29 @@ pnpm exec eslint src/app/api/chat/route.ts src/app/api/chat/route.test.ts
 3. 在已有聊天中输入草稿，再点 `+`：网址变为 `/?draft=新UUID`，右侧消息、输入和错误清空，浏览器不整页刷新。旧聊天仍在列表，点击可以恢复。
 4. 在新草稿中再次输入内容并点 `+`，草稿 ID 更新，输入同样清空。发送新问题后，网址变为 `?id=同一UUID`，回答连续生成；续聊使用相同 ID，刷新能看到已保存消息。
 
-检查命令：`pnpm typecheck`、`pnpm exec vitest run src/app/api/chat/route.test.ts`。数据库测试使用 `RUN_CHAT_DB_TESTS=1` 运行 `src/server/chats.integration.test.ts`，预期 7 项通过，包括新建 ID 冲突时不能覆盖自己或其他用户的聊天；只操作并清理临时测试用户数据。
+检查命令：`pnpm typecheck`、`pnpm exec vitest run src/app/api/chat/route.test.ts`。数据库测试使用 `RUN_CHAT_DB_TESTS=1` 运行 `src/server/chats.integration.test.ts`，预期 8 项通过，包括新建 ID 冲突时不能覆盖自己或其他用户的聊天，以及活动流的并发限制与权限；只操作并清理临时测试用户数据。
+
+## Day 2：第六、七题——滚动与恢复生成
+
+消息区使用 `use-stick-to-bottom`：初次打开停在底部，生成时跟随新增内容；向上滚动查看历史后停止自动跟随，点击“回到最新消息”继续跟随。输入框固定在底部，不随长消息滚出窗口。
+
+`ai-app-template_stream` 记录每次生成的 ID、所属聊天、创建时间和状态。`createStream` 在事务中检查聊天归属并锁住聊天，同一聊天只允许一个活动流；它与初始消息保存使用同一个事务。`getStreamsByChatId` 只返回当前用户可访问的聊天流。
+
+`resumable-stream/ioredis` 在后台消费 SDK 的 SSE 流，浏览器刷新、关闭标签页或切到其他聊天不会取消模型生成。当前 SDK 的 `resume` 和 `GET /api/chat/[id]/stream` 在回来后重放原流，`ResumableChatTransport` 将它标记为完整重放，避免追加重复文本或工具步骤。若生成刚好在页面加载后完成，恢复接口返回已保存的完整消息，处理这个时间差。恢复接口检查登录和归属，不调用模型，也不扣聊天额度。SDK 判断为网络断开后，重新联网或标签页再次可见时也会尝试重连。
+
+Redis 是恢复功能的必要条件；初始化连接失败返回 503，不消耗聊天额度、不调用模型。连接兼容旧版 Redis 的 `AUTH password`。部署时必须让原服务进程保持运行；这不能恢复已经被服务器重启杀掉的模型任务。每次生成最长 60 秒，超过两分钟仍未结束的活动记录可标为失败，避免进程异常后聊天永远被锁住。切换聊天后后台仍会生成，模型和搜索费用照常产生。
+
+数据库更新：对已有项目，先通过 SQL 客户端执行 `drizzle/rename-message-primary-key.sql`，它只重命名带连字符的旧主键约束，绕过旧版 drizzle-kit 的引号问题，不修改消息数据；再运行 `pnpm db:push`。新数据库可直接运行 `pnpm db:push`。
+
+验收步骤：
+
+1. 发送一个需要较长回答的问题，确认长消息出现时自动滚动，输入框始终可见。
+2. 生成过程中向上滚动，新内容不能把你拉回底部；点击“回到最新消息”应回到底部并继续跟随。
+3. 回答尚未完成时刷新，确认浏览器发起 `GET /api/chat/当前ID/stream`，已生成部分恢复并继续输出，不重复显示。
+4. 生成途中点 `+`，再点击原来的聊天，应接回同一条回答。完成后再次刷新，完整消息仍在。
+5. 用 `pnpm db:studio` 检查：同一轮只有一条 `stream` 记录，完成状态是 `completed`；刷新恢复没有增加该用户的 `chat_request` 记录。
+
+自动检查：`pnpm typecheck`；`RUN_CHAT_DB_TESTS=1` 下运行 `pnpm exec vitest run`，包含真实数据库权限、活动生成并发，以及恢复接口的未登录、跨用户访问、完成时机竞争、过期流和 Redis 故障测试。恢复本身不额外计费，手动开始新一轮聊天仍消耗正常额度。
 
 ## 后续待办
 

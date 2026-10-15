@@ -5,7 +5,10 @@ type SearchResult = Awaited<ReturnType<typeof searchSerper>>["organic"][number];
 
 export type SearchChatMessage = UIMessage<
   unknown,
-  { "chat-created": { chatId: string } },
+  {
+    "chat-created": { chatId: string };
+    "chat-restored": { messages: SearchChatMessage[] };
+  },
   {
     searchWeb: {
       input: { query: string };

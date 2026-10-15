@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
   quota: vi.fn(),
   getChat: vi.fn(),
   upsertChat: vi.fn(),
+  getContext: vi.fn(),
+  finishStream: vi.fn(),
 }));
 
 vi.mock("~/server/auth", () => ({ auth: mocks.auth }));
@@ -20,9 +22,14 @@ vi.mock("~/serper", () => ({ searchSerper: mocks.search }));
 vi.mock("~/server/chat-rate-limit", () => ({ consumeChatQuota: mocks.quota }));
 vi.mock("~/server/chats", () => ({
   ChatAlreadyExistsError: class extends Error {},
+  ChatStreamActiveError: class extends Error {},
   getChat: mocks.getChat,
   upsertChat: mocks.upsertChat,
 }));
+vi.mock("~/server/stream-context", () => ({
+  getStreamContext: mocks.getContext,
+}));
+vi.mock("~/server/streams", () => ({ finishStream: mocks.finishStream }));
 vi.mock("ai", async (importOriginal) => ({
   ...(await importOriginal<typeof AISDK>()),
   APICallError: { isInstance: () => false },
@@ -33,9 +40,17 @@ vi.mock("ai", async (importOriginal) => ({
 }));
 
 import { POST } from "./route";
-import { ChatAlreadyExistsError } from "~/server/chats";
+import { ChatAlreadyExistsError, ChatStreamActiveError } from "~/server/chats";
 
 const newChatId = "11111111-1111-4111-8111-111111111111";
+
+const mockStreamContext = () =>
+  mocks.getContext.mockResolvedValue({
+    createNewResumableStream: vi.fn(
+      async (_id: string, makeStream: () => ReadableStream<string>) =>
+        makeStream(),
+    ),
+  });
 
 const emptyModelStream = () =>
   new ReadableStream<AISDK.UIMessageChunk>({
@@ -47,6 +62,7 @@ const emptyModelStream = () =>
 describe("chat authentication", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    mockStreamContext();
     mocks.quota.mockResolvedValue({ status: "allowed" });
   });
 
@@ -134,7 +150,8 @@ describe("chat authentication", () => {
     const options = mocks.stream.mock.calls[0]![0] as Parameters<
       typeof AISDK.streamText
     >[0];
-    expect(options.abortSignal).toBe(request.signal);
+    expect(options.abortSignal).not.toBe(request.signal);
+    expect(options.abortSignal).toBeInstanceOf(AbortSignal);
     const search = options.tools!.searchWeb! as AISDK.Tool<
       { query: string },
       { title: string; link: string; snippet: string }[]
@@ -245,6 +262,7 @@ describe("chat persistence", () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
+    mockStreamContext();
     mocks.auth.mockResolvedValue({ user: { id: "test-user" } });
     mocks.quota.mockResolvedValue({ status: "allowed" });
     mocks.convert.mockResolvedValue([]);
@@ -257,13 +275,15 @@ describe("chat persistence", () => {
     const response = await POST(request({ messages, userId: "forged-user" }));
     const chatId = response.headers.get("X-Chat-Id");
     expect(chatId).toBe(newChatId);
-    expect(mocks.upsertChat).toHaveBeenCalledWith({
-      userId: "test-user",
-      chatId,
-      title: "第一个问题",
-      messages,
-      createOnly: true,
-    });
+    expect(mocks.upsertChat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: "test-user",
+        chatId,
+        title: "第一个问题",
+        messages,
+        createOnly: true,
+      }),
+    );
     expect(mocks.upsertChat.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.stream.mock.invocationCallOrder[0]!,
     );
@@ -290,13 +310,15 @@ describe("chat persistence", () => {
       chatId: "existing-chat",
     });
     expect(response.headers.get("X-Chat-Id")).toBe("existing-chat");
-    expect(mocks.upsertChat).toHaveBeenCalledWith({
-      userId: "test-user",
-      chatId: "existing-chat",
-      title: "原来的标题",
-      messages,
-      createOnly: false,
-    });
+    expect(mocks.upsertChat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: "test-user",
+        chatId: "existing-chat",
+        title: "原来的标题",
+        messages,
+        createOnly: false,
+      }),
+    );
     expect(await response.text()).not.toContain("data-chat-created");
   });
 
@@ -357,6 +379,24 @@ describe("chat persistence", () => {
     }
   });
 
+  it("does not consume quota or call the model if Redis cannot be initialized", async () => {
+    mocks.getContext.mockRejectedValue(new Error("Redis unavailable"));
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      expect((await POST(request())).status).toBe(503);
+      expect(mocks.quota).not.toHaveBeenCalled();
+      expect(mocks.stream).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("does not overwrite a chat that already has an active generation", async () => {
+    mocks.upsertChat.mockRejectedValue(new ChatStreamActiveError());
+    expect((await POST(request())).status).toBe(409);
+    expect(mocks.stream).not.toHaveBeenCalled();
+  });
+
   it("rejects a new-chat id collision without starting the model", async () => {
     mocks.upsertChat.mockRejectedValue(new ChatAlreadyExistsError());
     expect((await POST(request())).status).toBe(409);
@@ -386,6 +426,10 @@ describe("chat persistence", () => {
         },
       });
       expect(mocks.upsertChat).toHaveBeenCalledTimes(1);
+      expect(mocks.finishStream).toHaveBeenCalledWith(
+        expect.any(String),
+        "failed",
+      );
     },
   );
 
@@ -449,6 +493,10 @@ describe("chat persistence", () => {
     const response = await POST(request());
     const wire = await response.text();
     expect(mocks.upsertChat).toHaveBeenCalledTimes(2);
+    expect(mocks.finishStream).toHaveBeenCalledWith(
+      expect.any(String),
+      "completed",
+    );
     const finalSave = mocks.upsertChat.mock.calls[1]![0] as {
       chatId: string;
       messages: SearchChatMessage[];

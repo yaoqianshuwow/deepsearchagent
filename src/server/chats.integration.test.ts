@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { inArray } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import type postgres from "postgres";
 
 import type * as Database from "~/server/db";
@@ -145,6 +145,79 @@ describe.skipIf(process.env.RUN_CHAT_DB_TESTS !== "1")(
       expect(chat?.messages[0]).toMatchObject({ id: "a-second", order: 0 });
       await api.upsertChat({ userId, chatId, title: "空聊天", messages: [] });
       expect((await api.getChat({ userId, chatId }))?.messages).toEqual([]);
+    });
+
+    it("serializes generation starts and keeps stream records private", async () => {
+      const streamApi = await import("./streams");
+      const generationChatId = crypto.randomUUID();
+      const attempts = await Promise.allSettled(
+        [0, 1].map(() =>
+          api.upsertChat({
+            userId,
+            chatId: generationChatId,
+            title: "生成测试",
+            messages: original,
+            streamId: crypto.randomUUID(),
+          }),
+        ),
+      );
+      expect(
+        attempts.filter((attempt) => attempt.status === "fulfilled"),
+      ).toHaveLength(1);
+      const failed = attempts.find((attempt) => attempt.status === "rejected");
+      expect(
+        failed?.status === "rejected" &&
+          failed.reason instanceof api.ChatStreamActiveError,
+      ).toBe(true);
+      const list = await streamApi.getStreamsByChatId({
+        userId,
+        chatId: generationChatId,
+      });
+      expect(list).toHaveLength(1);
+      expect(
+        await streamApi.getStreamsByChatId({
+          userId: otherUserId,
+          chatId: generationChatId,
+        }),
+      ).toBeUndefined();
+      await expect(
+        streamApi.createStream({
+          userId: otherUserId,
+          chatId: generationChatId,
+        }),
+      ).rejects.toThrow("无权访问");
+      expect(
+        (await api.getChat({ userId, chatId: generationChatId }))?.messages,
+      ).toHaveLength(2);
+      await streamApi.finishStream(list![0]!.id, "completed");
+      await api.upsertChat({
+        userId,
+        chatId: generationChatId,
+        title: "续聊",
+        messages: original,
+        streamId: crypto.randomUUID(),
+      });
+      const active = (await streamApi.getStreamsByChatId({
+        userId,
+        chatId: generationChatId,
+      }))!.find((stream) => stream.status === "active")!;
+      await db
+        .update(schema.streams)
+        .set({ createdAt: new Date(Date.now() - 121000) })
+        .where(eq(schema.streams.id, active.id));
+      await api.upsertChat({
+        userId,
+        chatId: generationChatId,
+        title: "恢复过期生成",
+        messages: original,
+        streamId: crypto.randomUUID(),
+      });
+      expect(
+        (await streamApi.getStreamsByChatId({
+          userId,
+          chatId: generationChatId,
+        }))!.filter((stream) => stream.status === "active"),
+      ).toHaveLength(1);
     });
 
     it("keeps concurrent first writes as complete snapshots without duplicates", async () => {

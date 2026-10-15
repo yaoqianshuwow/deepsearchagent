@@ -2,13 +2,13 @@ import { and, asc, desc, eq } from "drizzle-orm";
 
 import { db } from "~/server/db";
 import { chats, messages } from "~/server/db/schema";
+import { createStream } from "~/server/streams";
+import { ChatAlreadyExistsError } from "~/server/chat-errors";
+export {
+  ChatAlreadyExistsError,
+  ChatStreamActiveError,
+} from "~/server/chat-errors";
 import type { SearchChatMessage } from "~/types/chat";
-
-export class ChatAlreadyExistsError extends Error {
-  constructor() {
-    super("聊天 ID 已存在，请重新开始新对话");
-  }
-}
 
 export const upsertChat = async (opts: {
   userId: string;
@@ -16,6 +16,7 @@ export const upsertChat = async (opts: {
   title: string;
   messages: SearchChatMessage[];
   createOnly?: boolean;
+  streamId?: string;
 }) => {
   return db.transaction(async (tx) => {
     const created = await tx
@@ -35,6 +36,13 @@ export const upsertChat = async (opts: {
       .for("update");
     if (!chat || chat.userId !== opts.userId) {
       throw new Error("无权修改此聊天");
+    }
+
+    if (opts.streamId) {
+      await createStream(
+        { userId: opts.userId, chatId: opts.chatId, streamId: opts.streamId },
+        tx,
+      );
     }
 
     const [savedChat] = await tx

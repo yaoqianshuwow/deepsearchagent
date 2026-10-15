@@ -10,6 +10,7 @@ import {
   boolean,
   serial,
   jsonb,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 import type { SearchChatMessage } from "~/types/chat";
 import type { AdapterAccount } from "next-auth/adapters";
@@ -81,7 +82,10 @@ export const messages = createTable(
     order: integer("order").notNull(),
   },
   (message) => ({
-    compoundKey: primaryKey({ columns: [message.chatId, message.id] }),
+    compoundKey: primaryKey({
+      name: "message_chat_id_id_pk",
+      columns: [message.chatId, message.id],
+    }),
     chatOrderIdx: index("message_chat_order_idx").on(
       message.chatId,
       message.order,
@@ -92,6 +96,37 @@ export const messages = createTable(
 export const chatsRelations = relations(chats, ({ one, many }) => ({
   user: one(users, { fields: [chats.userId], references: [users.id] }),
   messages: many(messages),
+  streams: many(streams),
+}));
+
+export const streams = createTable(
+  "stream",
+  {
+    id: varchar("id", { length: 255 }).primaryKey(),
+    chatId: varchar("chat_id", { length: 255 })
+      .notNull()
+      .references(() => chats.id, { onDelete: "cascade" }),
+    status: varchar("status", { length: 16 })
+      .$type<"active" | "completed" | "failed">()
+      .notNull()
+      .default("active"),
+    createdAt: timestamp("created_at", { mode: "date", withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (stream) => ({
+    chatDateIdx: index("stream_chat_date_idx").on(
+      stream.chatId,
+      stream.createdAt,
+    ),
+    activeChatIdx: uniqueIndex("stream_active_chat_idx")
+      .on(stream.chatId)
+      .where(sql`"status" = 'active'`),
+  }),
+);
+
+export const streamsRelations = relations(streams, ({ one }) => ({
+  chat: one(chats, { fields: [streams.chatId], references: [chats.id] }),
 }));
 
 export const messagesRelations = relations(messages, ({ one }) => ({

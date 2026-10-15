@@ -38,8 +38,10 @@
     "react-dom": "^18.3.1",
     "react-markdown": "^9.0.3",
     "rehype-raw": "^7.0.0",
+    "resumable-stream": "2.2.13",
     "robots-parser": "^3.0.1",
     "simple-icons": "^14.5.0",
+    "use-stick-to-bottom": "1.1.6",
     "zod": "^3.25.76"
   },
   "devDependencies": {
