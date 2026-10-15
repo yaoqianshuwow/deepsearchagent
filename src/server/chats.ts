@@ -4,17 +4,28 @@ import { db } from "~/server/db";
 import { chats, messages } from "~/server/db/schema";
 import type { SearchChatMessage } from "~/types/chat";
 
+export class ChatAlreadyExistsError extends Error {
+  constructor() {
+    super("聊天 ID 已存在，请重新开始新对话");
+  }
+}
+
 export const upsertChat = async (opts: {
   userId: string;
   chatId: string;
   title: string;
   messages: SearchChatMessage[];
+  createOnly?: boolean;
 }) => {
   return db.transaction(async (tx) => {
-    await tx
+    const created = await tx
       .insert(chats)
       .values({ id: opts.chatId, userId: opts.userId, title: opts.title })
-      .onConflictDoNothing({ target: chats.id });
+      .onConflictDoNothing({ target: chats.id })
+      .returning({ id: chats.id });
+    if (opts.createOnly && created.length === 0) {
+      throw new ChatAlreadyExistsError();
+    }
 
     // Serialize replacements for this chat, including simultaneous first writes.
     const [chat] = await tx

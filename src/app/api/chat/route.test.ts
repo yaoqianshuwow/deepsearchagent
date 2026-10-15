@@ -19,6 +19,7 @@ vi.mock("~/model", () => ({ model: "test-model" }));
 vi.mock("~/serper", () => ({ searchSerper: mocks.search }));
 vi.mock("~/server/chat-rate-limit", () => ({ consumeChatQuota: mocks.quota }));
 vi.mock("~/server/chats", () => ({
+  ChatAlreadyExistsError: class extends Error {},
   getChat: mocks.getChat,
   upsertChat: mocks.upsertChat,
 }));
@@ -32,6 +33,9 @@ vi.mock("ai", async (importOriginal) => ({
 }));
 
 import { POST } from "./route";
+import { ChatAlreadyExistsError } from "~/server/chats";
+
+const newChatId = "11111111-1111-4111-8111-111111111111";
 
 const emptyModelStream = () =>
   new ReadableStream<AISDK.UIMessageChunk>({
@@ -84,7 +88,7 @@ describe("chat authentication", () => {
     const response = await POST(
       new Request("http://localhost/api/chat", {
         method: "POST",
-        body: JSON.stringify({ messages }),
+        body: JSON.stringify({ messages, chatId: newChatId, isNewChat: true }),
       }),
     );
 
@@ -119,6 +123,8 @@ describe("chat authentication", () => {
     const request = new Request("http://localhost/api/chat", {
       method: "POST",
       body: JSON.stringify({
+        chatId: newChatId,
+        isNewChat: true,
         messages: [
           { id: "1", role: "user", parts: [{ type: "text", text: "Search" }] },
         ],
@@ -167,6 +173,8 @@ describe("chat authentication", () => {
       new Request("http://localhost/api/chat", {
         method: "POST",
         body: JSON.stringify({
+          chatId: newChatId,
+          isNewChat: true,
           messages: [
             { id: "1", role: "user", parts: [{ type: "text", text: "Hi" }] },
           ],
@@ -202,6 +210,8 @@ describe("chat authentication", () => {
         new Request("http://localhost/api/chat", {
           method: "POST",
           body: JSON.stringify({
+            chatId: newChatId,
+            isNewChat: true,
             messages: [
               { id: "1", role: "user", parts: [{ type: "text", text: "Hi" }] },
             ],
@@ -224,10 +234,10 @@ describe("chat persistence", () => {
       parts: [{ type: "text", text: "第一个问题" }],
     },
   ];
-  const request = (body: unknown = { messages }) =>
+  const request = (body: Record<string, unknown> = { messages }) =>
     new Request("http://localhost/api/chat", {
       method: "POST",
-      body: JSON.stringify(body),
+      body: JSON.stringify({ chatId: newChatId, isNewChat: true, ...body }),
     });
   const responseOptions = () =>
     mocks.response.mock
@@ -243,15 +253,16 @@ describe("chat persistence", () => {
     mocks.stream.mockReturnValue({ toUIMessageStream: mocks.response });
   });
 
-  it("saves before generation, uses the session's user, and returns the generated chat id", async () => {
+  it("saves before generation, uses the session's user, and preserves the supplied new chat id", async () => {
     const response = await POST(request({ messages, userId: "forged-user" }));
     const chatId = response.headers.get("X-Chat-Id");
-    expect(chatId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(chatId).toBe(newChatId);
     expect(mocks.upsertChat).toHaveBeenCalledWith({
       userId: "test-user",
       chatId,
       title: "第一个问题",
       messages,
+      createOnly: true,
     });
     expect(mocks.upsertChat.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.stream.mock.invocationCallOrder[0]!,
@@ -271,7 +282,9 @@ describe("chat persistence", () => {
       id: "existing-chat",
       title: "原来的标题",
     });
-    const response = await POST(request({ messages, chatId: "existing-chat" }));
+    const response = await POST(
+      request({ messages, chatId: "existing-chat", isNewChat: false }),
+    );
     expect(mocks.getChat).toHaveBeenCalledWith({
       userId: "test-user",
       chatId: "existing-chat",
@@ -282,6 +295,7 @@ describe("chat persistence", () => {
       chatId: "existing-chat",
       title: "原来的标题",
       messages,
+      createOnly: false,
     });
     expect(await response.text()).not.toContain("data-chat-created");
   });
@@ -289,7 +303,11 @@ describe("chat persistence", () => {
   it("rejects a missing or inaccessible chat before consuming quota or saving", async () => {
     mocks.getChat.mockResolvedValue(undefined);
     expect(
-      (await POST(request({ messages, chatId: "other-user-chat" }))).status,
+      (
+        await POST(
+          request({ messages, chatId: "other-user-chat", isNewChat: false }),
+        )
+      ).status,
     ).toBe(404);
     expect(mocks.quota).not.toHaveBeenCalled();
     expect(mocks.upsertChat).not.toHaveBeenCalled();
@@ -301,6 +319,9 @@ describe("chat persistence", () => {
       { messages, chatId: "" },
       { messages, chatId: 123 },
       { messages, chatId: "a".repeat(256) },
+      { messages, chatId: undefined },
+      { messages, isNewChat: undefined },
+      { messages, isNewChat: "true" },
       {
         messages: [
           { id: "1", role: "user", parts: [{ type: "text", text: 123 }] },
@@ -334,6 +355,12 @@ describe("chat persistence", () => {
     } finally {
       log.mockRestore();
     }
+  });
+
+  it("rejects a new-chat id collision without starting the model", async () => {
+    mocks.upsertChat.mockRejectedValue(new ChatAlreadyExistsError());
+    expect((await POST(request())).status).toBe(409);
+    expect(mocks.stream).not.toHaveBeenCalled();
   });
 
   it.each(["aborted", "failed", "cancelled"])(

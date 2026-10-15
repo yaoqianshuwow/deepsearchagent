@@ -16,13 +16,14 @@ import { model } from "~/model";
 import { searchSerper } from "~/serper";
 import { auth } from "~/server/auth";
 import { consumeChatQuota } from "~/server/chat-rate-limit";
-import { getChat, upsertChat } from "~/server/chats";
+import { ChatAlreadyExistsError, getChat, upsertChat } from "~/server/chats";
 import type { SearchChatMessage } from "~/types/chat";
 
 export const maxDuration = 60;
 
 const requestSchema = z.object({
-  chatId: z.string().trim().min(1).max(255).optional(),
+  chatId: z.string().trim().min(1).max(255),
+  isNewChat: z.boolean(),
   messages: z.array(z.unknown()).min(1),
 });
 
@@ -51,10 +52,12 @@ export async function POST(request: Request) {
 
   let modelMessages;
   let messages: SearchChatMessage[];
-  let chatId: string | undefined;
+  let chatId: string;
+  let isNewChat: boolean;
   try {
     const body = requestSchema.parse(await request.json());
     chatId = body.chatId;
+    isNewChat = body.isNewChat;
     messages = await validateUIMessages<SearchChatMessage>({
       messages: body.messages,
       tools,
@@ -81,7 +84,7 @@ export async function POST(request: Request) {
       .trim()
       .slice(0, 100) ?? "";
   let title = firstQuestion.length > 0 ? firstQuestion : "新聊天";
-  if (chatId) {
+  if (!isNewChat) {
     try {
       const chat = await getChat({ userId, chatId });
       if (!chat) {
@@ -114,11 +117,20 @@ export async function POST(request: Request) {
     );
   }
 
-  const savedChatId = chatId ?? crypto.randomUUID();
+  const savedChatId = chatId;
   try {
     // Save the user message even if generation fails or the stream is cancelled.
-    await upsertChat({ userId, chatId: savedChatId, title, messages });
+    await upsertChat({
+      userId,
+      chatId: savedChatId,
+      title,
+      messages,
+      createOnly: isNewChat,
+    });
   } catch (error) {
+    if (error instanceof ChatAlreadyExistsError) {
+      return new Response(error.message, { status: 409 });
+    }
     console.error("Chat save failed", error);
     return new Response("暂时无法保存聊天，请稍后重试", { status: 503 });
   }
@@ -180,7 +192,7 @@ export async function POST(request: Request) {
 
   const stream = createUIMessageStream<SearchChatMessage>({
     execute: ({ writer }) => {
-      if (!chatId) {
+      if (isNewChat) {
         writer.write({
           type: "data-chat-created",
           data: { chatId: savedChatId },

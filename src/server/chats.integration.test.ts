@@ -73,6 +73,23 @@ describe.skipIf(process.env.RUN_CHAT_DB_TESTS !== "1")(
       expect(chat?.messages.map((message) => message.order)).toEqual([0, 1]);
     });
 
+    it("does not overwrite an existing chat when creating a new chat with a colliding id", async () => {
+      for (const owner of [userId, otherUserId]) {
+        await expect(
+          api.upsertChat({
+            userId: owner,
+            chatId,
+            title: "不应覆盖",
+            messages: [],
+            createOnly: true,
+          }),
+        ).rejects.toBeInstanceOf(api.ChatAlreadyExistsError);
+      }
+      const chat = await api.getChat({ userId, chatId });
+      expect(chat?.title).toBe("第一次聊天");
+      expect(chat?.messages).toHaveLength(2);
+    });
+
     it("only lists the owner's chats without loading their messages", async () => {
       const list = await api.getChats({ userId });
       expect(list).toHaveLength(1);

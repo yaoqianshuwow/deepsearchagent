@@ -4,7 +4,7 @@ import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import { LoaderCircle } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 
 import { ChatMessage } from "~/components/chat-message";
 import { SignInModal } from "~/components/sign-in-modal";
@@ -13,29 +13,39 @@ import type { SearchChatMessage } from "~/types/chat";
 interface ChatProps {
   userName: string;
   isAuthenticated: boolean;
-  chatId: string | undefined;
+  chatId: string;
+  isNewChat: boolean;
+  initialMessages: SearchChatMessage[];
 }
 
-export const ChatPage = ({ userName, isAuthenticated, chatId }: ChatProps) => {
+export const ChatPage = ({
+  userName,
+  isAuthenticated,
+  chatId,
+  isNewChat,
+  initialMessages,
+}: ChatProps) => {
   const router = useRouter();
-  const chatIdRef = useRef(chatId);
-  useEffect(() => {
-    chatIdRef.current = chatId;
-  }, [chatId]);
+  const isNewChatRef = useRef(isNewChat);
   const [input, setInput] = useState("");
   const [isSignInOpen, setIsSignInOpen] = useState(false);
   const { messages, sendMessage, status, error } = useChat<SearchChatMessage>({
+    id: chatId,
+    messages: initialMessages,
     // Keep the hook's identity stable when the URL changes during generation.
     transport: new DefaultChatTransport({
-      body: () => ({ chatId: chatIdRef.current }),
+      body: () => ({ chatId, isNewChat: isNewChatRef.current }),
     }),
     onData: (part) => {
       if (part.type === "data-chat-created") {
-        chatIdRef.current = part.data.chatId;
+        isNewChatRef.current = false;
         router.push(`?id=${encodeURIComponent(part.data.chatId)}`, {
           scroll: false,
         });
       }
+    },
+    onFinish: ({ isAbort, isDisconnect, isError }) => {
+      if (!isAbort && !isDisconnect && !isError) router.refresh();
     },
   });
   const isLoading = status === "submitted" || status === "streaming";
